@@ -900,7 +900,7 @@ with tab1:
             max_aeronaves = st.slider(
                 "🔢 **Máximo de Aeronaves no Gráfico:**",
                 min_value=5,
-                max_value=50,
+                max_value=53,
                 value=10,
                 step=1,
                 help="Limite o número de aeronaves para melhor visualização",
@@ -1502,7 +1502,7 @@ with tab1:
             max_aeronaves_perc = st.slider(
                 "🔢 **Máximo de Aeronaves no Gráfico:**",
                 min_value=5,
-                max_value=50,
+                max_value=53,
                 value=8,
                 step=1,
                 help="Limite o número de aeronaves para melhor visualização",
