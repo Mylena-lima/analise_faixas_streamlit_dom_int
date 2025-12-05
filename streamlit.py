@@ -84,7 +84,7 @@ def gerar_paleta_cores_aeronaves():
     '#FF8C00', '#e7cb94', '#843c39', '#ad494a', '#d6616b', # Laranja Escuro
     '#e7969c', '#7b4173', '#a55194', '#ce6dbd', '#de9ed6',
     '#40E0D0', '#FFD700', '#6A5ACD', '#FA8072', '#008B8B',
-    'B8860B', '#FF00FF', '#32CD32', '#8B0000', '#66CDAA',
+    '#B8860B', '#FF00FF', '#32CD32', '#8B0000', '#66CDAA',
     '#D2691E', '#000080', '#F0E68C', '#DDA0DD'
     ]
     return cores_base
@@ -352,7 +352,7 @@ with tab1:
             st.markdown("*Use os sliders abaixo para definir os limites de cada faixa de passageiros (E + D):*")
             
             # Valores padrão baseados nas faixas_padrao (ajustados dinamicamente)
-            valores_padrao_base = [2000, 30000, 50000, 200000, 500000, 1000000, 2000000, 5000000, 10000000, 15000000, 25000000]
+            valores_padrao_base = [5000, 20000, 60000, 200000, 400000, 1000000, 2000000, 5000000, 10000000, 15000000, 25000000]
             
             # Cores e ícones para as faixas
             cores_icones = ["🟢", "🟡", "🟠", "🔴", "🟣", "🔵", "⚫", "⚪", "🟤", "🔶", "🔷"]
