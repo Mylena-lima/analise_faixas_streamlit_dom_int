@@ -1,0 +1,82 @@
+Faixa AvG
+-0 a 5k
+-C208
+-Aeroportos da faixa 1 em 2024 com pax menor que 5k usam apenas C208 com 
+constância recente (2024 e 2025), por isso o aumento do intervalo da faixa 0, cuja 
+aeronave crítica continua sendo C208
+
+Faixa 1
+-5k a 20k
+-ATR
+-Aeroportos da faixa 1 em 2024 com pax superior a 20k utilizam ou têm potencial de
+utilizar E1 / E2, por isso o limite superior da faixa foi reduzido para que esses
+aeroportos façam parte da faixa 2
+-Existem 10 aeroportos com pax entre 20k a 30k em 2024:
+3/10 utilizam E1 / E2 com constância (SBJI, SBVH e SSKW)
+2/10 tiveram seus voos comerciais descontinuados (SBCP e SBTG)
+1/10 passou a só operar voos internacionais em 2025 (SBCB)
+1/10 utilizava E1 com constância, mas em 2025 entrou em reforma e parou de utilizar (SWPI)
+3/10 não utilizam E1 / E2, utilizam apenas ATR com constância (SBPO, SNPD e SNCP)
+
+Faixa 2
+-20k a 60k
+-E2
+-E1 / E2 possuem movimentos constantes nessa faixa, sem picos de movimentos
+-Aeroportos com pax inferior a 60k não utilizam A20N, aeronave crítica da Faixa 3
+
+Faixa 3
+-60k a 200k
+-A20N / B738
+-O E2 passou a ser aeronave crítica da faixa anterior e saiu da faixa 3
+
+Faixa 4
+-200k a 400k
+-A320 / B38M
+-Foi realizada uma clusterização pelo método k-means utilizando como variáveis o pax 
+(doméstico + internacional), php simultâneto, php de embarque e php de desembarque
+-No cluster 4, nos 4 anos analisados, todos os aeroportos possuem pax inferior a 400k
+
+Faixa 5
+-400k a 1M
+-A320 / B38M
+-A diferença entre as faixas 4 e 5 é o PHP, as aeronaves utilizadas são as mesmas
+-Na faixa 5 não há movimento constante e geral com aeronave maior que as críticas atuais 
+
+Faixa 6
+-1M a 2M
+-A321 / A21N
+-A partir de 2024, surgem movimentações com A21N, que possui peso de decolagem superior
+ao A321
+
+Faixa 7
+-2M a 5M
+-A332 / A333*
+-6 aeroportos de 10 que compõem a faixa em 2024 utilizam a A332, 3 de forma constante,
+(SBEG, SBFL, SBVT) e apenas um utiliza a A333 (SBMO) de forma não constante
+-A332 e A333 possuem peso de decolagem e comprimento de pista similares, sendo a A333
+um pouco maior
+-*Poderiam considerar apenas a A332, pois não há movimento constante da A333
+-Não há movimentação constante significativa de aeronaves maiores que essas
+
+Faixa 8
+-5M a 10M
+-A339
+-Não há movimentação constante significativa de aeronaves maiores que essa
+
+Faixa 9
+-10M a 15M
+-A339
+-Todos os 4 aeroportos da faixa em 2024 utilizam A339 de forma constante e com frequência
+superior a 60 por mês
+-A aeronave crítica deixaria de ser a A359, pois apenas 2 aeroportos da faixa de 2024
+já fizeram uso dessa aeronave de forma constante (SBGL e SBKP)
+-SBKP só utilizou A359 em 2023 com frequência inferior a 60 por mês
+-SBGL possui um comportamento atípico devido à quantidade de voos internacionais, o que
+traz aeronaves maiores (B77W) de forma constante e frequente
+
+Faixa 10
+-15M a 20M
+-B77W
+-Há movimentação constante com frequência superior a 60 por mês de aeronaves 4F 
+(B748 e A388), porém SBGR possui restrições para utilização de aeronaves 4F, ficando 
+essa faixa limitada ao código 4E
