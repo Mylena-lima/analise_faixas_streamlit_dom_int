@@ -140,7 +140,7 @@ def carregar_dados():
     )
 
     faixas_padrao = {
-    'bins': [0, 2000, 30000, 50000, 200000, 500000, 1000000, 2000000, 5000000, 10000000, 15000000, float('inf')],
+    'bins': [0, 5000, 20000, 60000, 200000, 400000, 1000000, 2000000, 5000000, 10000000, 15000000, float('inf')],
     'labels': ['Faixa_AvG', 'Faixa_1', 'Faixa_2', 'Faixa_3', 'Faixa_4', 'Faixa_5', 'Faixa_6', 'Faixa_7', 'Faixa_8', 'Faixa_9', 'Faixa_10']
 }
     return aeroporto_pax, voos_aeroporto_aeronave, faixas_padrao
@@ -325,7 +325,7 @@ with tab1:
     st.header("🎯 **Configuração de Faixas Personalizadas**")
 
     # Toggle para usar faixas personalizadas - em destaque
-    usar_faixas_personalizadas = st.checkbox("🔧 **Ativar Configuração Personalizada de Faixas**", value=True, help="Ative para definir seus próprios intervalos de faixas")
+    usar_faixas_personalizadas = st.checkbox("🔧 **Ativar Configuração Personalizada de Faixas**", value=True, help="Ative para definir seus próprios intervalos de faixas", key="usar_faixas_personalizadas")
 
     if usar_faixas_personalizadas:
         # Seletor de quantidade de faixas
@@ -337,11 +337,12 @@ with tab1:
                 "📊 **Quantidade de Faixas:**",
                 options=[3, 4, 5, 6, 7, 8, 9, 10, 11],
                 index=7,  # Default para 10 faixas (índice 7)
-                help="Escolha quantas faixas deseja configurar (além da Faixa AvG)"
+                help="Escolha quantas faixas deseja configurar (além da Faixa AvG)",
+                key="num_faixas"
             )
         
         with col_config2:
-            st.info(f"**Configuração Atual:**\n- Faixa AvG (sempre presente)\n- {num_faixas} faixas numeradas\n- **Total: {num_faixas + 1} faixas**")
+            st.info(f"**Configuração Atual:**\n- Faixa AvG (sempre presente)\n- {st.session_state.num_faixas} faixas numeradas\n- **Total: {st.session_state.num_faixas + 1} faixas**")
         
         st.markdown("---")
 
@@ -352,7 +353,7 @@ with tab1:
             st.markdown("*Use os sliders abaixo para definir os limites de cada faixa de passageiros (E + D):*")
             
             # Valores padrão baseados nas faixas_padrao (ajustados dinamicamente)
-            valores_padrao_base = [5000, 20000, 60000, 200000, 400000, 1000000, 2000000, 5000000, 10000000, 15000000, 25000000]
+            valores_padrao_base = [5000, 20000, 60000, 200000, 400000, 1000000, 2000000, 5000000, 10000000, 15000000, 50000000]
             
             # Cores e ícones para as faixas
             cores_icones = ["🟢", "🟡", "🟠", "🔴", "🟣", "🔵", "⚫", "⚪", "🟤", "🔶", "🔷"]
@@ -368,11 +369,11 @@ with tab1:
                 st.session_state[f'slider_faixa_{idx}'] = st.session_state[f'num_faixa_{idx}']
             
             # Calcular quantas colunas usar baseado no número de faixas
-            num_colunas = 2 if num_faixas <= 6 else 3
+            num_colunas = 2 if st.session_state.num_faixas <= 6 else 3
             
             # Organizar sliders em grupos
             sliders_por_linha = 2 if num_colunas == 2 else 3
-            num_linhas = (num_faixas + sliders_por_linha - 1) // sliders_por_linha
+            num_linhas = (st.session_state.num_faixas + sliders_por_linha - 1) // sliders_por_linha
             
             for linha in range(num_linhas):
                 # Determinar o título da seção baseado na linha
@@ -390,7 +391,7 @@ with tab1:
                 for col_idx in range(sliders_por_linha):
                     faixa_idx = linha * sliders_por_linha + col_idx
                     
-                    if faixa_idx < num_faixas:
+                    if faixa_idx < st.session_state.num_faixas:
                         with cols[col_idx % num_colunas]:
                             # Determinar valores para este slider
                             if faixa_idx == 0:
@@ -427,7 +428,7 @@ with tab1:
                                     max_val = 5000000
                                     step = 1000
                                 else:
-                                    max_val = 25000000
+                                    max_val = 50000000
                                     step = 10000
                                 
                                 default_val = max(valores_padrao_base[faixa_idx] if faixa_idx < len(valores_padrao_base) else min_val + step, min_val)
@@ -474,7 +475,7 @@ with tab1:
         bins_personalizados = [0] + faixas_personalizadas + [float('inf')]
         
         # Gerar labels dinamicamente baseado na quantidade de faixas
-        labels_personalizados = ['Faixa_AvG'] + [f'Faixa_{i}' for i in range(1, num_faixas + 1)]
+        labels_personalizados = ['Faixa_AvG'] + [f'Faixa_{i}' for i in range(1, st.session_state.num_faixas + 1)]
         
         faixas_utilizadas = {
             'bins': bins_personalizados,
@@ -486,7 +487,7 @@ with tab1:
         st.markdown("#### 📋 **Resumo das Faixas Configuradas**")
 
         # Determinar número de colunas para o resumo baseado na quantidade de faixas
-        num_cols_resumo = min(4, num_faixas + 1)  # Máximo 4 colunas
+        num_cols_resumo = min(4, st.session_state.num_faixas + 1)  # Máximo 4 colunas
         cols = st.columns(num_cols_resumo)
 
         for i, (inicio, fim, label) in enumerate(zip(bins_personalizados[:-1], bins_personalizados[1:], labels_personalizados)):
@@ -2030,14 +2031,42 @@ with tab2:
 
     # Filtrar dados pelos anos selecionados
     df_ano_voos = df_filtrado1.filter(pl.col("ano").is_in(anos_selecionados_categoria))
-    df_ano_pax = df_filtrado2.filter(pl.col("ano").is_in(anos_selecionados_categoria)).select(["aeroporto", "passageiros_projetado"])
+    df_ano_pax = df_filtrado2.filter(pl.col("ano").is_in(anos_selecionados_categoria))
     
-    df_joined = df_ano_voos.join(df_ano_pax, on="aeroporto", how="left").drop_nulls()
+    df_joined = df_ano_pax.join(df_ano_voos, on=["aeroporto", "ano"], how="left").with_columns(
+        pl.col("quantidade_voos").fill_null(0),
+        pl.col("pax").fill_null(0)
+    )
+
+    # Definir thresholds com base na configuração da Tab 1
+    # Inicializar 'usar_faixas_personalizadas' e 'num_faixas' em st.session_state se não existirem
+    # para evitar erro na primeira execução antes da Tab 1 ser totalmente renderizada.
+    if 'usar_faixas_personalizadas' not in st.session_state:
+        st.session_state.usar_faixas_personalizadas = True
+    if 'num_faixas' not in st.session_state:
+        st.session_state.num_faixas = 10  # Padrão da tab1
+
+    if st.session_state.get('usar_faixas_personalizadas', True):
+        # Se as faixas personalizadas estiverem ativas, usar os limites dos sliders
+        valores_padrao_base = [5000, 20000, 60000, 200000, 400000, 1000000, 2000000, 5000000, 10000000, 15000000, 50000000]
+        num_faixas_ativas = st.session_state.get('num_faixas', 10)
+        
+        faixas_personalizadas_tab2 = []
+        for i in range(num_faixas_ativas):
+            # Tenta obter o valor do slider do session_state, se não existir, usa um valor padrão
+            # Isso garante que a Tab 2 funcione mesmo antes de todos os sliders da Tab 1 serem criados
+            default_val = valores_padrao_base[i] if i < len(valores_padrao_base) else 50000000
+            limite = st.session_state.get(f'slider_faixa_{i}', default_val)
+            faixas_personalizadas_tab2.append(limite)
+        
+        # Os thresholds são os limites superiores das faixas
+        thresholds = sorted(faixas_personalizadas_tab2)
+    else:
+        # Se estiver usando faixas padrão, extrair os limites do dicionário padrão
+        # Excluir 0 e 'inf'
+        thresholds = faixas_padrao['bins'][1:-1]
 
     if df_joined.height > 0:
-        # Definir os pontos do eixo X (limites de passageiros)
-        thresholds = [1000.1, 3000, 6500, 12000, 19500, 30000, 50000, 79000, 150000, 310000, 600000, 2000000, 4000000, 10000000, 15000000, 50000000]
-        
         # Ordem das categorias para garantir consistência
         ordem_desejada = ["1B", "2B", "3B", "2C", "3C", "3D", "4C", "4D", "4E", "4F"]
         
@@ -2064,13 +2093,25 @@ with tab2:
         # Adicionar 0 no início para o primeiro intervalo
         thresholds_with_zero = [0] + thresholds
 
+        # Adicionar um ponto final para o gráfico para o intervalo "infinito", usando 50M como limite visual
+        final_plot_point = 50_000_000
+        if thresholds and final_plot_point > thresholds[-1]:
+            thresholds_with_zero.append(final_plot_point)
+        elif thresholds:
+            # Se o último threshold já for maior, usar um valor ligeiramente superior para o ponto final
+            thresholds_with_zero.append(thresholds[-1] * 1.05)
+
         for i in range(len(thresholds_with_zero) - 1):
             lower_bound = thresholds_with_zero[i]
             upper_bound = thresholds_with_zero[i+1]
 
-            df_in_range = df_joined.filter(
-                (pl.col("passageiros_projetado") > lower_bound) & (pl.col("passageiros_projetado") <= upper_bound)
-            )
+            # O último intervalo deve incluir tudo acima do limite inferior
+            if i == len(thresholds_with_zero) - 2:
+                df_in_range = df_joined.filter(pl.col("passageiros_projetado") > lower_bound)
+            else:
+                df_in_range = df_joined.filter(
+                    (pl.col("passageiros_projetado") > lower_bound) & (pl.col("passageiros_projetado") <= upper_bound)
+                )
 
             if df_in_range.height > 0:
                 total_voos_threshold = df_in_range["quantidade_voos"].sum()
@@ -2093,7 +2134,7 @@ with tab2:
 
                     df_threshold_results = df_full_cat.with_columns([
                         (pl.col("voos_categoria") / total_voos_threshold * 100).alias("percentual_voos"),
-                        (pl.col("passageiros_categoria") / total_passageiros_threshold * 100).alias("percentual_passageiros"),
+                        (pl.col("passageiros_categoria") / total_passageiros_threshold * 100 if total_passageiros_threshold > 0 else 0).alias("percentual_passageiros"),
                         pl.lit(upper_bound).cast(pl.Float64).alias("limite_passageiros")
                     ])
                     
@@ -2149,18 +2190,18 @@ with tab2:
             # Formatar os labels do eixo x para maior clareza
             ticktext = []
             tickvals_plot = []
-            for t in thresholds:
-                tickvals_plot.append(1000 if t == 1000.1 else t)
-                
-                label_val = 1000 if t == 1000.1 else t
-
+            plot_thresholds = df_final.get_column("limite_passageiros").unique().sort().to_list()
+            
+            for t in plot_thresholds:
+                label_val = t
                 if label_val >= 1000000:
                     label = f'{label_val / 1000000:g}M'
                 elif label_val >= 1000:
                     label = f'{label_val / 1000:g}k'
                 else:
-                    label = str(label_val)
+                    label = str(int(label_val))
                 ticktext.append(label)
+                tickvals_plot.append(t)
 
             fig_cumulative_fleet.update_layout(
                 yaxis_ticksuffix="%",
@@ -2178,22 +2219,26 @@ with tab2:
             with st.expander("🔍 **Explorar Detalhes por Faixa de Passageiros**", expanded=False):
                 # Criar labels para o seletor
                 threshold_labels = {}
-                for i, upper_bound in enumerate(thresholds):
-                    lower_bound = 0 if i == 0 else thresholds[i-1]
+                processed_thresholds = sorted(detailed_data.keys())
+
+                for i, upper_bound in enumerate(processed_thresholds):
+                    lower_bound = 0 if i == 0 else processed_thresholds[i-1]
 
                     # Format upper bound
-                    label_val_upper = 1000 if upper_bound == 1000.1 else int(upper_bound)
+                    label_val_upper = int(upper_bound)
                     if label_val_upper >= 1000000: upper_str = f'{label_val_upper / 1000000:g}M'
                     elif label_val_upper >= 1000: upper_str = f'{label_val_upper / 1000:g}k'
                     else: upper_str = str(label_val_upper)
 
                     # Format lower bound
-                    label_val_lower = 0 if lower_bound == 0 else (1000 if lower_bound == 1000.1 else int(lower_bound))
+                    label_val_lower = int(lower_bound)
                     if label_val_lower >= 1000000: lower_str = f'{label_val_lower / 1000000:g}M'
                     elif label_val_lower >= 1000: lower_str = f'{label_val_lower / 1000:g}k'
                     else: lower_str = str(label_val_lower)
 
-                    if i == 0:
+                    if i == len(processed_thresholds) - 1:
+                        label = f'Acima de {lower_str} passageiros'
+                    elif i == 0:
                         label = f'Até {upper_str} passageiros'
                     else:
                         label = f'Entre {lower_str} e {upper_str} passageiros'
