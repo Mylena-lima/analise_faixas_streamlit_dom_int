@@ -109,15 +109,16 @@ def obter_cor_aeronave(aeronave, todas_aeronaves):
 
 @st.cache_data
 def carregar_dados():
-    aeroporto_pax = pl.read_parquet("faixas_aeroportos.parquet").with_columns(
+    aeroporto_pax = pl.read_parquet("faixas_aeroportos_2.parquet").with_columns(
         pl.col("ano").cast(pl.Int64)
     )
 
     # Carregar dados de voos (arquivo já contém coluna 'mes')
-    voos_aeroporto_aeronave = pl.read_parquet("voos_por_aeronave_aeroporto_mes3.parquet").with_columns([
+    voos_aeroporto_aeronave = pl.read_parquet("voos_por_aeronave_aeroporto_mes4.parquet").with_columns([
         pl.col("ano").cast(pl.Int64),
         pl.col("mes").cast(pl.Int64)
-    ])
+    ]).filter(
+        ~((pl.col("ano") == 2025) & (pl.col("mes") >= 11)))
 
     # Calcular o total de passageiros (pax) do DW por aeroporto e ano
     pax_dw = (voos_aeroporto_aeronave
@@ -541,6 +542,7 @@ with tab1:
     # Aplicar as faixas aos dados filtrados
     df_com_faixas = aplicar_faixas_personalizadas(df_filtrado2, faixas_utilizadas)
 
+
     # Seção de Análise das Faixas (Compacta)
     st.header("📊 Resultado da Configuração")
 
@@ -757,15 +759,18 @@ with tab1:
                 key="ano_explore"
             )
         
-        # Filtrar aeroportos da faixa e ano selecionados
-        aeroportos_faixa = (df_com_faixas
-                           .filter(
-                               (pl.col("faixa_personalizada") == faixa_selecionada) &
-                               (pl.col("ano") == ano_selecionado_explore)
-                           )
-                           .select(["aeroporto", "passageiros_projetado"])
-                           .sort("passageiros_projetado", descending=True))
-        
+        # Filtrar aeroportos da faixa e ano selecionados — remover duplicatas por aeroporto
+        aeroportos_faixa = (
+            df_com_faixas
+            .filter(
+                (pl.col("faixa_personalizada") == faixa_selecionada) &
+                (pl.col("ano") == ano_selecionado_explore)
+            )
+            .select(["aeroporto", "passageiros_projetado"])
+            .unique(subset=["aeroporto"])
+            .sort("passageiros_projetado", descending=True)
+        )
+
         # Verificar se há dados para a combinação selecionada
         if aeroportos_faixa.height > 0:
             st.markdown(f"### 🏢 **Aeroportos na {faixa_selecionada} - Ano {ano_selecionado_explore}**")
@@ -860,6 +865,141 @@ with tab1:
             st.warning(f"⚠️ **Nenhum aeroporto encontrado na {faixa_selecionada} para o ano {ano_selecionado_explore}.**")
             st.info("💡 Tente selecionar uma faixa ou ano diferente.")
 
+    st.markdown("---")
+    st.header("✈️ **Resumo - Aeronaves**")
+    st.markdown("### Identifique a aeronave dominante por Faixa e Ano")
+
+    # Layout dos filtros específicos para este tópico
+    col_resumo_filtros1, col_resumo_filtros2 = st.columns(2)
+
+    with col_resumo_filtros1:
+        # Obter faixas disponíveis e ordenar corretamente
+        faixas_resumo = df_com_faixas["faixa_personalizada"].unique().to_list()
+        
+        # Função local para ordenar (reaproveitando lógica existente)
+        def ordenar_faixas_resumo(faixa):
+            if faixa == 'Faixa_AvG':
+                return (0, 'AvG')
+            else:
+                try:
+                    return (1, int(faixa.split('_')[1]))
+                except:
+                    return (2, faixa)
+        
+        faixas_resumo = sorted(faixas_resumo, key=ordenar_faixas_resumo)
+        
+        faixa_sel_resumo = st.selectbox(
+            "📍 **Selecione a Faixa:**",
+            options=faixas_resumo,
+            key="faixa_resumo_aeronave"
+        )
+
+    with col_resumo_filtros2:
+        # Filtro de Ano
+        anos_resumo = sorted(df_com_faixas["ano"].unique().to_list())
+        ano_sel_resumo = st.selectbox(
+            "📅 **Selecione o Ano:**",
+            options=anos_resumo,
+            index=len(anos_resumo)-1, # Padrão: último ano disponível
+            key="ano_resumo_aeronave"
+        )
+
+    # --- LÓGICA DE CÁLCULO ---
+    
+    # 1. Identificar quais aeroportos pertencem à Faixa selecionada no Ano selecionado
+    # Usamos o df_com_faixas que já possui a classificação (faixa_personalizada)
+    aeroportos_alvo = df_com_faixas.filter(
+        (pl.col("faixa_personalizada") == faixa_sel_resumo) &
+        (pl.col("ano") == ano_sel_resumo)
+    )
+    
+    # Lista de códigos de aeroportos
+    lista_aeroportos_alvo = aeroportos_alvo["aeroporto"].unique().to_list()
+
+    if not lista_aeroportos_alvo:
+        st.warning(f"⚠️ Não existem aeroportos classificados na **{faixa_sel_resumo}** em **{ano_sel_resumo}**.")
+    else:
+        # 2. Filtrar dados de voos/aeronaves (df_filtrado1) apenas para esses aeroportos e esse ano
+        # Isso garante que estamos olhando apenas para a movimentação daquele ano específico
+        dados_aeronaves = df_filtrado1.filter(
+            (pl.col("ano") == ano_sel_resumo) &
+            (pl.col("aeroporto").is_in(lista_aeroportos_alvo))
+        )
+
+        if dados_aeronaves.height > 0:
+            # 3. Agrupar por aeronave e somar passageiros (E + D)
+            ranking_geral = (
+                dados_aeronaves
+                .group_by("aeronave")
+                .agg([pl.sum("pax").alias("total_pax"),
+                     pl.sum("quantidade_voos").alias("total_voos")])
+            )
+
+            # --- CÁLCULO LÍDER EM PASSAGEIROS ---
+            top_pax_df = ranking_geral.sort("total_pax", descending=True)
+            total_pax_faixa = top_pax_df["total_pax"].sum()
+            
+            lider_pax_row = top_pax_df.row(0, named=True)
+            nome_lider_pax = lider_pax_row["aeronave"]
+            qtd_lider_pax = lider_pax_row["total_pax"]
+            perc_lider_pax = (qtd_lider_pax / total_pax_faixa * 100) if total_pax_faixa > 0 else 0
+
+            # --- CÁLCULO LÍDER EM VOOS ---
+            top_voos_df = ranking_geral.sort("total_voos", descending=True)
+            total_voos_faixa = top_voos_df["total_voos"].sum()
+            
+            lider_voos_row = top_voos_df.row(0, named=True)
+            nome_lider_voos = lider_voos_row["aeronave"]
+            qtd_lider_voos = lider_voos_row["total_voos"]
+            perc_lider_voos = (qtd_lider_voos / total_voos_faixa * 100) if total_voos_faixa > 0 else 0
+
+            # --- APRESENTAÇÃO DOS RESULTADOS ---
+            
+            with st.container():
+                # Linha 1: Passageiros
+                st.markdown("##### 👥 **Líder em Passageiros**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Aeronave", nome_lider_pax)
+                c2.metric("Total Passageiros (E+D)", formatar_numero(qtd_lider_pax))
+                c3.metric("Participação (Pax)", f"{perc_lider_pax:.1f}%")
+                
+                st.markdown("") # Espaçamento
+
+                # Linha 2: Voos
+                st.markdown("##### 🛫 **Líder em Movimentos (Voos)**")
+                c4, c5, c6 = st.columns(3)
+                c4.metric("Aeronave", nome_lider_voos)
+                c5.metric("Total Movimentos (P+D)", formatar_numero(qtd_lider_voos))
+                c6.metric("Participação (Voos)", f"{perc_lider_voos:.1f}%")
+
+            # Tabela Expandida com ambos os dados
+            with st.expander(f"📋 Ver Detalhes Top Aeronaves - {faixa_sel_resumo} ({ano_sel_resumo})"):
+                # Mostrar ordenado por PAX por padrão, mas com coluna de voos visível
+                tabela_final = top_pax_df.head(10).with_columns([
+                    (pl.col("total_pax") / total_pax_faixa * 100).alias("share_pax"),
+                    (pl.col("total_voos") / total_voos_faixa * 100).alias("share_voos")
+                ]).to_pandas()
+
+                # Formatação para exibição
+                tabela_final['total_pax_fmt'] = tabela_final['total_pax'].apply(lambda x: formatar_numero(x))
+                tabela_final['total_voos_fmt'] = tabela_final['total_voos'].apply(lambda x: formatar_numero(x))
+
+                st.dataframe(
+                    tabela_final[['aeronave', 'total_pax_fmt', 'share_pax', 'total_voos_fmt', 'share_voos']],
+                    column_config={
+                        "aeronave": "Aeronave",
+                        "total_pax_fmt": "Passageiros",
+                        "share_pax": st.column_config.NumberColumn("% Pax", format="%.1f%%"),
+                        "total_voos_fmt": "Movimentos",
+                        "share_voos": st.column_config.NumberColumn("% Mov", format="%.1f%%")
+                    },
+                    hide_index=True,
+                    use_container_width=True
+                )
+        else:
+            st.info(f"ℹ️ Existem aeroportos nesta faixa, mas sem dados detalhados para o ano {ano_sel_resumo}.")
+
+            
     # Nova Seção: Evolução Temporal de Voos por Aeronave
     st.markdown("---")
     st.header("📈 **Evolução Temporal de Movimentos (P + D) por Aeronave**")
