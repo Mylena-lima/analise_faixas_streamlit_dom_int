@@ -904,94 +904,176 @@ with tab1:
             key="ano_resumo_aeronave"
         )
 
+    # --- CARREGAR ESPECIFICAÇÕES (CACHE) ---
+    @st.cache_data
+    def carregar_specs_aeronaves():
+        try:
+            # Carrega o arquivo parquet especificado
+            df = pl.read_parquet("especificacoes_aeronave_2.parquet")
+            
+            # Garante a tipagem correta das colunas numéricas para ordenação
+            # Colunas esperadas: sg_equipamento_icao, moda_assentos, Pista_Requerida_100%
+            df = df.with_columns([
+                pl.col("moda_assentos").cast(pl.Int64).fill_null(0),
+                pl.col("Pista_Requerida_100%").cast(pl.Int64).fill_null(0)
+            ])
+            return df
+        except Exception as e:
+            st.error(f"Erro ao carregar especificacoes_aeronave_2.parquet: {e}")
+            return None
+
+    df_specs = carregar_specs_aeronaves()
+
     # --- LÓGICA DE CÁLCULO ---
     
-    # 1. Identificar quais aeroportos pertencem à Faixa selecionada no Ano selecionado
-    # Usamos o df_com_faixas que já possui a classificação (faixa_personalizada)
+    # 1. Identificar aeroportos da faixa/ano
     aeroportos_alvo = df_com_faixas.filter(
         (pl.col("faixa_personalizada") == faixa_sel_resumo) &
         (pl.col("ano") == ano_sel_resumo)
     )
-    
-    # Lista de códigos de aeroportos
     lista_aeroportos_alvo = aeroportos_alvo["aeroporto"].unique().to_list()
 
     if not lista_aeroportos_alvo:
         st.warning(f"⚠️ Não existem aeroportos classificados na **{faixa_sel_resumo}** em **{ano_sel_resumo}**.")
     else:
-        # 2. Filtrar dados de voos/aeronaves (df_filtrado1) apenas para esses aeroportos e esse ano
-        # Isso garante que estamos olhando apenas para a movimentação daquele ano específico
+        # 2. Filtrar dados de voos
         dados_aeronaves = df_filtrado1.filter(
             (pl.col("ano") == ano_sel_resumo) &
             (pl.col("aeroporto").is_in(lista_aeroportos_alvo))
         )
 
         if dados_aeronaves.height > 0:
-            # 3. Agrupar por aeronave e somar passageiros (E + D)
+            # --- CÁLCULOS OPERACIONAIS (Pax e Voos) ---
             ranking_geral = (
                 dados_aeronaves
                 .group_by("aeronave")
-                .agg([pl.sum("pax").alias("total_pax"),
-                     pl.sum("quantidade_voos").alias("total_voos")])
+                .agg([
+                    pl.sum("pax").alias("total_pax"),
+                    pl.sum("quantidade_voos").alias("total_voos")
+                ])
             )
 
-            # --- CÁLCULO LÍDER EM PASSAGEIROS ---
+            # Totais da faixa para cálculo de share
+            total_pax_faixa = ranking_geral["total_pax"].sum()
+            total_voos_faixa = ranking_geral["total_voos"].sum()
+
+            # Líder em Passageiros
             top_pax_df = ranking_geral.sort("total_pax", descending=True)
-            total_pax_faixa = top_pax_df["total_pax"].sum()
-            
             lider_pax_row = top_pax_df.row(0, named=True)
             nome_lider_pax = lider_pax_row["aeronave"]
             qtd_lider_pax = lider_pax_row["total_pax"]
             perc_lider_pax = (qtd_lider_pax / total_pax_faixa * 100) if total_pax_faixa > 0 else 0
 
-            # --- CÁLCULO LÍDER EM VOOS ---
+            # Líder em Voos
             top_voos_df = ranking_geral.sort("total_voos", descending=True)
-            total_voos_faixa = top_voos_df["total_voos"].sum()
-            
             lider_voos_row = top_voos_df.row(0, named=True)
             nome_lider_voos = lider_voos_row["aeronave"]
             qtd_lider_voos = lider_voos_row["total_voos"]
             perc_lider_voos = (qtd_lider_voos / total_voos_faixa * 100) if total_voos_faixa > 0 else 0
 
+            # --- CÁLCULOS TÉCNICOS (Assentos e Pista) ---
+            # Identificar a "Maior Aeronave" dentre as que operaram na faixa
+            
+            lider_assentos_nome = "N/A"
+            lider_assentos_val = 0
+            lider_pista_nome = "N/A"
+            lider_pista_val = 0
+
+            if df_specs is not None:
+                # Pegar lista de aeronaves que realmente voaram nesta faixa/ano
+                aeronaves_operantes = ranking_geral["aeronave"].to_list()
+                
+                # Filtrar o parquet de specs para olhar apenas essas aeronaves
+                # Cruzando 'sg_equipamento_icao' (specs) com 'aeronave' (voos)
+                specs_faixa = df_specs.filter(
+                    pl.col("sg_equipamento_icao").is_in(aeronaves_operantes)
+                )
+
+                if specs_faixa.height > 0:
+                    # Maior Capacidade (Moda Assentos)
+                    try:
+                        row_max_assentos = specs_faixa.sort("moda_assentos", descending=True).row(0, named=True)
+                        lider_assentos_nome = row_max_assentos["sg_equipamento_icao"]
+                        lider_assentos_val = row_max_assentos["moda_assentos"]
+                    except:
+                        pass
+
+                    # Maior Exigência de Pista
+                    try:
+                        row_max_pista = specs_faixa.sort("Pista_Requerida_100%", descending=True).row(0, named=True)
+                        lider_pista_nome = row_max_pista["sg_equipamento_icao"]
+                        lider_pista_val = row_max_pista["Pista_Requerida_100%"]
+                    except:
+                        pass
+
             # --- APRESENTAÇÃO DOS RESULTADOS ---
             
             with st.container():
-                # Linha 1: Passageiros
-                st.markdown("##### 👥 **Líder em Passageiros**")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Aeronave", nome_lider_pax)
-                c2.metric("Total Passageiros (E+D)", formatar_numero(qtd_lider_pax))
-                c3.metric("Participação (Pax)", f"{perc_lider_pax:.1f}%")
+                # Seção 1: Líderes Operacionais (Quem mais voou/transportou)
+                st.markdown("##### 👥 **Dominância Operacional**")
+                c1, c2, c3, c4 = st.columns(4)
                 
-                st.markdown("") # Espaçamento
+                c1.metric("Líder em Pax", nome_lider_pax, help="Aeronave que transportou o maior volume total de passageiros")
+                c2.metric("Qtd. Passageiros", formatar_numero(qtd_lider_pax), f"Share: {perc_lider_pax:.1f}%")
+                
+                c3.metric("Líder em Voos", nome_lider_voos, help="Aeronave que realizou o maior número de pousos e decolagens")
+                c4.metric("Qtd. Movimentos", formatar_numero(qtd_lider_voos), f"Share: {perc_lider_voos:.1f}%")
 
-                # Linha 2: Voos
-                st.markdown("##### 🛫 **Líder em Movimentos (Voos)**")
-                c4, c5, c6 = st.columns(3)
-                c4.metric("Aeronave", nome_lider_voos)
-                c5.metric("Total Movimentos (P+D)", formatar_numero(qtd_lider_voos))
-                c6.metric("Participação (Voos)", f"{perc_lider_voos:.1f}%")
+                st.divider()
 
-            # Tabela Expandida com ambos os dados
-            with st.expander(f"📋 Ver Detalhes Top Aeronaves - {faixa_sel_resumo} ({ano_sel_resumo})"):
-                # Mostrar ordenado por PAX por padrão, mas com coluna de voos visível
-                tabela_final = top_pax_df.head(10).with_columns([
+                # Seção 2: Extremos Técnicos (As "maiores" aeronaves que operaram)
+                st.markdown("##### 🛠️ **Extremos Técnicos (Dentre as aeronaves operantes)**")
+                c5, c6, c7, c8 = st.columns(4)
+
+                c5.metric("Maior Capacidade", lider_assentos_nome, help="Aeronave operante com maior oferta de assentos (moda)")
+                c6.metric("Assentos (Moda)", f"{lider_assentos_val}", help="Quantidade típica de assentos ofertados")
+
+                c7.metric("Maior Pista Req.", lider_pista_nome, help="Aeronave operante que exige a maior pista")
+                c8.metric("Pista (100%)", f"{formatar_numero(lider_pista_val)} m", help="Comprimento de pista requerido")
+
+            # Tabela Expandida
+            with st.expander(f"📋 Ver Dados Detalhados da {faixa_sel_resumo}"):
+                # Preparar tabela unindo dados operacionais com specs
+                if df_specs is not None:
+                    # Join para trazer specs para a tabela
+                    tabela_final = ranking_geral.join(
+                        df_specs.select(["sg_equipamento_icao", "moda_assentos", "Pista_Requerida_100%"]),
+                        left_on="aeronave",
+                        right_on="sg_equipamento_icao",
+                        how="left"
+                    )
+                else:
+                    tabela_final = ranking_geral.with_columns([
+                        pl.lit(0).alias("moda_assentos"),
+                        pl.lit(0).alias("Pista_Requerida_100%")
+                    ])
+
+                # Calcular shares e formatar
+                tabela_final = tabela_final.with_columns([
                     (pl.col("total_pax") / total_pax_faixa * 100).alias("share_pax"),
                     (pl.col("total_voos") / total_voos_faixa * 100).alias("share_voos")
-                ]).to_pandas()
+                ]).sort("total_pax", descending=True)
 
-                # Formatação para exibição
-                tabela_final['total_pax_fmt'] = tabela_final['total_pax'].apply(lambda x: formatar_numero(x))
-                tabela_final['total_voos_fmt'] = tabela_final['total_voos'].apply(lambda x: formatar_numero(x))
+                tabela_pandas = tabela_final.to_pandas()
+                
+                # Formatação visual
+                tabela_pandas['total_pax_fmt'] = tabela_pandas['total_pax'].apply(lambda x: formatar_numero(x))
+                tabela_pandas['total_voos_fmt'] = tabela_pandas['total_voos'].apply(lambda x: formatar_numero(x))
+                
+                # Tratar nulos nas specs para exibição
+                tabela_pandas['moda_assentos'] = tabela_pandas['moda_assentos'].fillna(0).astype(int)
+                tabela_pandas['Pista_Requerida_100%'] = tabela_pandas['Pista_Requerida_100%'].fillna(0).apply(lambda x: formatar_numero(x) if x > 0 else "-")
 
                 st.dataframe(
-                    tabela_final[['aeronave', 'total_pax_fmt', 'share_pax', 'total_voos_fmt', 'share_voos']],
+                    tabela_pandas[['aeronave', 'total_pax_fmt', 'share_pax', 'total_voos_fmt', 'share_voos', 'moda_assentos', 'Pista_Requerida_100%']],
                     column_config={
                         "aeronave": "Aeronave",
                         "total_pax_fmt": "Passageiros",
                         "share_pax": st.column_config.NumberColumn("% Pax", format="%.1f%%"),
                         "total_voos_fmt": "Movimentos",
-                        "share_voos": st.column_config.NumberColumn("% Mov", format="%.1f%%")
+                        "share_voos": st.column_config.NumberColumn("% Mov", format="%.1f%%"),
+                        "moda_assentos": st.column_config.NumberColumn("Assentos", help="Moda de Assentos"),
+                        "Pista_Requerida_100%": st.column_config.TextColumn("Pista Req. (m)", help="Pista necessária (MTOW)")
                     },
                     hide_index=True,
                     use_container_width=True
@@ -999,7 +1081,7 @@ with tab1:
         else:
             st.info(f"ℹ️ Existem aeroportos nesta faixa, mas sem dados detalhados para o ano {ano_sel_resumo}.")
 
-            
+
     # Nova Seção: Evolução Temporal de Voos por Aeronave
     st.markdown("---")
     st.header("📈 **Evolução Temporal de Movimentos (P + D) por Aeronave**")
