@@ -1520,7 +1520,7 @@ with tab1:
                     help="O maior código de referência de aeródromo presente e relevante nos dados históricos."
                 )
 
-            with st.expander("📋 **Ver Tabela Detalhada por Categoria (Apenas Relevantes)**"):
+            with st.expander("📋 **Ver Tabela Detalhada por Categoria**"):
                 st.dataframe(df_master_cat_share_filtrado.style.format("{:.2%}"), use_container_width=True)
         else:
             st.warning("⚠️ Não foi possível gerar o gráfico de categorias (Coluna 'categoria_aeronave' ausente).")
