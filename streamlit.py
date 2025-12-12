@@ -7,6 +7,7 @@ import locale
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+import pmdarima as pm
 
 # ----------------------------------------------------------
 
@@ -970,248 +971,172 @@ with tab1:
                     index=len(options_end)-1
                 )
 
-    # --- 2. PROCESSAMENTO DOS DADOS ---
+    # --- 2. PROCESSAMENTO DOS DADOS (BASE COMPLETA PARA O MODELO) ---
 
-    # Converter períodos selecionados para inteiros para filtragem fácil
+    # Parse dos filtros de tempo (Apenas para controle de visualização posterior)
     start_year, start_month = map(int, start_period.split("-M"))
     end_year, end_month = map(int, end_period.split("-M"))
 
-    # Passo 1: Identificar Aeroportos/Anos que atendem ao critério de passageiros
-    # Isso retorna pares (aeroporto, ano) válidos
+    # Passo 1: Identificar Aeroportos que atendem ao critério de passageiros
     aeroportos_validos_pax = df_com_faixas.filter(
         (pl.col("passageiros_projetado") >= pax_range_selecionado[0]) &
         (pl.col("passageiros_projetado") <= pax_range_selecionado[1])
     ).select(["aeroporto", "ano"])
 
-    # Passo 2: Filtrar a base de voos (df_filtrado1)
-    # Aplicar filtro de Data E Join com os aeroportos válidos pelo critério de pax
-    
-    # Lógica de filtro de data complexa (vários anos)
-    # Condição: (Ano > Start OR (Ano == Start AND Mes >= Start_Mes)) AND (Ano < End OR (Ano == End AND Mes <= End_Mes))
-    df_voos_work = df_filtrado1.filter(
-        (pl.col("ano") > start_year) | ((pl.col("ano") == start_year) & (pl.col("mes") >= start_month))
-    ).filter(
-        (pl.col("ano") < end_year) | ((pl.col("ano") == end_year) & (pl.col("mes") <= end_month))
-    )
-
-    # Filtrar apenas aeroportos que estão na faixa de passageiros NO ANO CORRESPONDENTE DO VOO
-    # Fazemos um inner join com aeroportos_validos_pax nas colunas [aeroporto, ano]
-    df_voos_filtrado_final = df_voos_work.join(aeroportos_validos_pax, on=["aeroporto", "ano"], how="inner")
+    # Passo 2: Filtrar a base de voos - MODO "FULL HISTORY"
+    # [CRÍTICO]: NÃO aplicamos o filtro de data (start_year/end_year) aqui.
+    # O modelo SARIMAX precisa de todo o histórico disponível para aprender a sazonalidade corretamente.
+    df_voos_filtrado_final = df_filtrado1.join(aeroportos_validos_pax, on=["aeroporto", "ano"], how="inner")
 
     if df_voos_filtrado_final.height == 0:
-        st.warning("⚠️ Nenhum dado encontrado para os filtros selecionados.")
+        st.warning("⚠️ Nenhum dado encontrado para a faixa de passageiros selecionada.")
     else:
-        # --- 3. CÁLCULO DA MÉTRICA ---
-        # Fórmula: Valor = Quantidade Voos * Pax
+        # --- 3. CÁLCULO DA MÉTRICA (BASE COMPLETA) ---
         
+        # Criação da coluna 'periodo_str' e cálculo ponderado na base completa
         df_calculado = df_voos_filtrado_final.with_columns(
             (pl.col("quantidade_voos") * pl.col("pax")).alias("valor_ponderado"),
             (pl.col("ano").cast(pl.Utf8) + "-M" + pl.col("mes").cast(pl.Utf8).str.zfill(2)).alias("periodo_str")
         )
 
-        # Agrupar por Período e Aeronave
-        df_agrupado_aeronave = df_calculado.group_by(["periodo_str", "aeronave"]).agg(
-            pl.sum("valor_ponderado").alias("soma_numerador")
-        )
+        # --- 4. VISUALIZAÇÃO GRÁFICO 1 COM PROJEÇÃO SARIMAX "BOTTOM-UP" ---
 
-        # Calcular o denominador (Soma total do valor ponderado por período, independente da aeronave)
-        df_agrupado_periodo = df_calculado.group_by(["periodo_str"]).agg(
-            pl.sum("valor_ponderado").alias("soma_denominador")
-        )
+        st.markdown(f"#### 📈 **Evolução da Métrica Ponderada**")
 
-        # Juntar e calcular a razão
-        df_final_grafico = df_agrupado_aeronave.join(df_agrupado_periodo, on="periodo_str").with_columns(
-            (pl.col("soma_numerador") / pl.col("soma_denominador")).alias("y_calculado")
-        ).sort("periodo_str")
-
-        # Top N aeronaves para não poluir o gráfico (opcional, mas recomendado)
-        top_aeronaves_list = df_final_grafico.group_by("aeronave").agg(pl.sum("y_calculado")).sort("y_calculado", descending=True)["aeronave"].to_list()
+        # --- 4.1 PREPARAÇÃO DOS DADOS ---
         
-        df_plot = df_final_grafico.filter(pl.col("aeronave").is_in(top_aeronaves_list)).to_pandas()
-
-        # --- 4. VISUALIZAÇÃO ---
-        
-        st.markdown(f"#### 📈 **Evolução da Métrica Ponderada por Aeronave**")
-        
-
-        # Converter para Pandas para usar Statsmodels
         df_base_pandas = df_calculado.select(["periodo_str", "aeronave", "valor_ponderado"]).to_pandas()
         
-        # Função para converter "2022-M01" em datetime real
         def converter_periodo(p):
             ano, mes = p.split("-M")
             return pd.Timestamp(year=int(ano), month=int(mes), day=1)
 
         df_base_pandas["data"] = df_base_pandas["periodo_str"].apply(converter_periodo)
         
-        # Determinar range de datas para o índice completo (Histórico + 24 meses futuro)
-        data_min = df_base_pandas["data"].min()
-        data_max = df_base_pandas["data"].max()
-        # Índice mensal completo até +24 meses
-        idx_completo = pd.date_range(start=data_min, periods=len(pd.date_range(data_min, data_max, freq='MS')) + 24, freq='MS')
+        # Data de corte real (último dado disponível no banco)
+        data_corte = df_base_pandas["data"].max()
         
-        # --- 4.2 FUNÇÃO DE FORECAST SARIMAX ---
+        # --- 4.2 LÓGICA DE CONTROLE DA PROJEÇÃO ---
+        
+        # Converter a seleção do usuário para Timestamp para comparação
+        data_fim_usuario = pd.Timestamp(year=end_year, month=end_month, day=1)
+        data_inicio_usuario = pd.Timestamp(year=start_year, month=start_month, day=1)
+        
+        # [REGRA DE NEGÓCIO]: Só permitir projeção se o usuário estiver vendo até o final da série
+        permitir_projecao = (data_fim_usuario == data_corte)
+        
+        aviso_projecao = ""
+        if not permitir_projecao:
+            aviso_projecao = " (Indisponível: Selecione o último mês disponível no filtro de data)"
+
+        # --- 4.3 FUNÇÃO DE FORECAST (AUTO_ARIMA) ---
         def projetar_sarimax(series_historica, passos=24):
-            """
-            Recebe uma Series pandas com DatetimeIndex.
-            Retorna a Series histórica + 24 meses de projeção.
-            """
-            # Reindexar para garantir frequência mensal (preenchendo buracos com 0)
-            # É crucial para o SARIMAX que não haja buracos na linha do tempo
-            series_full = series_historica.asfreq('MS').fillna(0)
-            
-            # Se tivermos muito poucos dados (< 12 meses), SARIMAX sazonal falha.
-            # Fallback para média simples ou Holt se necessário.
-            if len(series_full) < 12:
-                # Fallback simples: Repete a média dos últimos 3 meses
-                media_recente = series_full.iloc[-3:].mean()
-                forecast = pd.Series([media_recente] * passos, index=pd.date_range(series_full.index[-1] + pd.DateOffset(months=1), periods=passos, freq='MS'))
-                return pd.concat([series_full, forecast])
-            
-            try:
-                # Configuração SARIMAX (1,1,1)x(1,1,0,12) é genérica e robusta para dados mensais de aviação
-                # enforce_stationarity=False ajuda a convergir mesmo com dados difíceis
-                model = sm.tsa.statespace.SARIMAX(
-                    series_full,
-                    order=(1, 1, 1),
-                    seasonal_order=(1, 1, 0, 12),
-                    enforce_stationarity=False,
-                    enforce_invertibility=False
-                )
-                results = model.fit(disp=False)
-                forecast = results.get_forecast(steps=passos).predicted_mean
-                
-                # Evitar valores negativos (comum em projeções matemáticas de séries próximas a zero)
-                forecast = forecast.clip(lower=0)
-                
-                return pd.concat([series_full, forecast])
-                
-            except Exception:
-                # Em caso de falha matemática (ex: LinAlgError), usa média móvel exponencial
-                model = sm.tsa.SimpleExpSmoothing(series_full).fit()
-                forecast = model.forecast(passos)
-                return pd.concat([series_full, forecast])# --- 4.2 FUNÇÃO DE FORECAST SARIMAX ---
-        def projetar_sarimax(series_historica, passos=24):
-            # Agrupar por data para remover duplicatas (aeroportos) e garantir unicidade
-            series_grouped = series_historica.groupby("data").sum()
-            
-            # Reindexar para garantir frequência mensal (preenchendo meses vazios com 0)
+            # Agrupar por data para somar duplicatas (vários aeroportos)
+            series_grouped = series_historica.groupby(level=0).sum()
             series_full = series_grouped.asfreq('MS').fillna(0)
             
-            # Se a série for muito curta ou zerada, retorna zeros ou média simples
-            if len(series_full) < 12 or series_full.sum() == 0:
+            # Validação: se tiver poucos dados ou for tudo zero
+            if len(series_full) < 12 or float(series_full.sum()) == 0:
                 media_recente = series_full.iloc[-6:].mean() if len(series_full) > 0 else 0
                 idx_futuro = pd.date_range(series_full.index[-1] + pd.DateOffset(months=1), periods=passos, freq='MS')
                 forecast = pd.Series([media_recente] * passos, index=idx_futuro)
                 return pd.concat([series_full, forecast])
             
             try:
-                # Modelo SARIMAX robusto para dados mensais
-                model = sm.tsa.statespace.SARIMAX(
-                    series_full,
-                    order=(1, 1, 1),
-                    seasonal_order=(1, 1, 0, 12), # Sazonalidade anual
-                    enforce_stationarity=False,
-                    enforce_invertibility=False
+                # Usando auto_arima para otimização
+                model = pm.auto_arima(
+                    series_full, seasonal=True, m=12, trace=False, 
+                    error_action='ignore', suppress_warnings=True, stepwise=True,
+                    max_p=2, max_q=2, max_P=1, max_Q=1
                 )
-                results = model.fit(disp=False)
-                forecast = results.get_forecast(steps=passos).predicted_mean
-                forecast = forecast.clip(lower=0) # Sem valores negativos
-                return pd.concat([series_full, forecast])
+                forecast_values = model.predict(n_periods=passos)
+                idx_futuro = pd.date_range(series_full.index[-1] + pd.DateOffset(months=1), periods=passos, freq='MS')
+                forecast_series = pd.Series(forecast_values, index=idx_futuro).clip(lower=0)
+                return pd.concat([series_full, forecast_series])
                 
-            except:
-                # Fallback para Suavização Exponencial em caso de erro matemático
+            except Exception:
                 try:
-                    model = sm.tsa.SimpleExpSmoothing(series_full).fit()
-                    forecast = model.forecast(passos)
-                    return pd.concat([series_full, forecast])
+                    from statsmodels.tsa.holtwinters import SimpleExpSmoothing
+                    model_fallback = SimpleExpSmoothing(series_full).fit()
+                    forecast_values = model_fallback.forecast(passos)
+                    return pd.concat([series_full, forecast_values])
                 except:
-                    # Último recurso: média simples
                     idx_futuro = pd.date_range(series_full.index[-1] + pd.DateOffset(months=1), periods=passos, freq='MS')
                     forecast = pd.Series([series_full.mean()] * passos, index=idx_futuro)
                     return pd.concat([series_full, forecast])
 
-        # --- 4.3 CÁLCULO DAS PROJEÇÕES ---
+        # --- 4.4 CÁLCULO MASSIVO E SHARE ---
         
-        with st.spinner("Calculando modelos SARIMAX para todas as aeronaves..."):
-            
-            # Lista de TODAS as aeronaves presentes no filtro (não apenas Top 15)
-            # Precisamos projetar todas para ter o denominador correto (100%)
+        with st.spinner("Calculando modelos SARIMAX..."):
             todas_aeronaves_filtro = df_base_pandas["aeronave"].unique()
-            
             dict_projecoes_absolutas = {}
             
-            # 1. Projetar valor absoluto (Numerador) para CADA aeronave
             for aeronave in todas_aeronaves_filtro:
-                # Filtrar apenas dados desta aeronave
+                # Extrair Series numérica explicitamente
                 df_nave = df_base_pandas[df_base_pandas["aeronave"] == aeronave].set_index("data")["valor_ponderado"]
-                # Projetar
                 dict_projecoes_absolutas[aeronave] = projetar_sarimax(df_nave)
             
-            # 2. Criar DataFrame Mestre (Linhas=Datas, Colunas=Aeronaves)
+            # DataFrame Mestre Absoluto (Numeradores Projetados)
             df_master_absoluto = pd.DataFrame(dict_projecoes_absolutas).fillna(0)
             
-            # 3. Calcular o Denominador Projetado (Soma de todas as colunas linha a linha)
-            # Isso garante que Denominador = Soma(Numeradores)
+            # Denominador = Soma dos Numeradores
             df_master_absoluto["TOTAL_MERCADO"] = df_master_absoluto.sum(axis=1)
             
-            # 4. Calcular o Share (Índice) para cada aeronave
-            # Divide cada coluna pelo TOTAL_MERCADO
-            df_master_share = df_master_absoluto.div(df_master_absoluto["TOTAL_MERCADO"], axis=0).fillna(0)
+            # Cálculo do Share (Índice)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                df_master_share = df_master_absoluto.div(df_master_absoluto["TOTAL_MERCADO"], axis=0).fillna(0)
             
-            # Remover coluna de total do dataframe de share
             df_master_share = df_master_share.drop(columns=["TOTAL_MERCADO"])
 
-        # --- 4.4 PLOTAGEM ---
+        # --- 4.5 PLOTAGEM GRÁFICO 1 ---
         
-        # 1. Aplicar Filtro de Relevância Mínima (0.01%)
-        # Só queremos aeronaves que tiveram pelo menos um mês relevante no histórico real
-        df_share_historico_check = df_master_share[df_master_share.index <= data_max]
+        # 1. Filtro de Relevância (0.01% no histórico)
+        # Corta o dataframe na data atual para verificar relevância apenas no passado
+        df_share_hist_check = df_master_share[df_master_share.index <= data_corte]
+        aeronaves_relevantes = [c for c in df_share_hist_check.columns if df_share_hist_check[c].max() >= 0.0001]
         
-        # Identificar colunas (aeronaves) onde o valor MÁXIMO no histórico foi >= 0.0001 (0.01%)
-        aeronaves_relevantes = [
-            col for col in df_share_historico_check.columns 
-            if df_share_historico_check[col].max() >= 0.0001
-        ]
-        
-        # Filtrar o DataFrame mestre para manter apenas essas aeronaves
         df_master_share_filtrado = df_master_share[aeronaves_relevantes]
-
-        # Identificar as Top N aeronaves com base no Share ACUMULADO GLOBAL (Histórico + Futuro)
-        top_aeronaves_plot = df_master_share_filtrado.sum().sort_values(ascending=False).index.tolist()
         
-        # Lista global para manter cores consistentes
+        # 2. Identificar Top N (Global acumulado)
+        if not aeronaves_relevantes:
+            st.warning("⚠️ Nenhuma aeronave atingiu o critério mínimo de 0,01% de participação no histórico.")
+            top_aeronaves_plot = []
+        else:
+            top_aeronaves_plot = df_master_share_filtrado.sum().sort_values(ascending=False).index.tolist()
+        
+        # 3. Preparar View (Zoom do Usuário)
+        # O dataframe de plotagem contém histórico recortado + projeção completa (se habilitada)
+        df_view = df_master_share[top_aeronaves_plot]
+        
+        df_view_hist = df_view[(df_view.index >= data_inicio_usuario) & (df_view.index <= data_fim_usuario)]
+        df_view_proj = df_view[df_view.index > data_corte]
+
+        # Lista global para cores
         lista_global_aeronaves = sorted(df_filtrado1["aeronave"].unique().to_list())
         
-        # Preparar eixo X ordenado para o Plotly
-        todos_periodos_ordenados = [f"{d.year}-M{str(d.month).zfill(2)}" for d in df_master_share.index]
+        # Eixo X ordenado para Plotly
+        datas_eixo_x = sorted(list(df_view_hist.index) + (list(df_view_proj.index) if permitir_projecao else []))
+        todos_periodos_ordenados = [f"{d.year}-M{str(d.month).zfill(2)}" for d in datas_eixo_x]
 
         fig_custom = go.Figure()
         
-        mostrar_projecao = st.checkbox("🔮 Mostrar Projeção SARIMAX (2 Anos)", value=True)
+        mostrar_projecao = st.checkbox(
+            f"🔮 Mostrar Projeção SARIMAX (2 Anos){aviso_projecao}", 
+            value=(True if permitir_projecao else False),
+            disabled=(not permitir_projecao),
+            key="chk_projecao_aeronave"
+        )
 
         for aeronave in top_aeronaves_plot:
-            # Pegar a série completa de share dessa aeronave
-            series_share = df_master_share[aeronave]
             cor = obter_cor_aeronave(aeronave, lista_global_aeronaves)
             
-            # Separar Histórico e Projeção com base na data de corte original
-            share_hist = series_share[series_share.index <= data_max]
-            share_proj = series_share[series_share.index > data_max]
+            # Série Histórica
+            series_hist = df_view_hist[aeronave]
+            x_hist = [f"{d.year}-M{str(d.month).zfill(2)}" for d in series_hist.index]
             
-            # Ponto de conexão (para o gráfico não ficar quebrado)
-            if len(share_hist) > 0 and len(share_proj) > 0:
-                ponto_conexao = share_hist.iloc[[-1]]
-                share_proj = pd.concat([ponto_conexao, share_proj])
-
-            # Converter datas para strings formatadas
-            x_hist = [f"{d.year}-M{str(d.month).zfill(2)}" for d in share_hist.index]
-            x_proj = [f"{d.year}-M{str(d.month).zfill(2)}" for d in share_proj.index]
-
-            # Plotar Histórico (Sólido)
             fig_custom.add_trace(go.Scatter(
                 x=x_hist,
-                y=share_hist.values,
+                y=series_hist.values,
                 mode='lines+markers',
                 name=aeronave,
                 line=dict(color=cor, width=2),
@@ -1220,57 +1145,53 @@ with tab1:
                 hovertemplate='<b>%{x}</b><br>Aeronave: %{fullData.name}<br>Share: %{y:.2%}<extra></extra>'
             ))
             
-            # Plotar Projeção (Tracejado)
-            if mostrar_projecao and len(share_proj) > 1:
+            # Série Projetada
+            if mostrar_projecao and permitir_projecao:
+                series_proj = df_view_proj[aeronave]
+                
+                # Conexão visual: Adiciona o último ponto do histórico ao início da projeção
+                if len(series_hist) > 0 and len(series_proj) > 0 and series_hist.index[-1] == data_corte:
+                    ponto_conexao = series_hist.iloc[[-1]]
+                    series_proj = pd.concat([ponto_conexao, series_proj])
+                
+                x_proj = [f"{d.year}-M{str(d.month).zfill(2)}" for d in series_proj.index]
+
                 fig_custom.add_trace(go.Scatter(
                     x=x_proj,
-                    y=share_proj.values,
+                    y=series_proj.values,
                     mode='lines',
                     name=f"Projeção {aeronave}",
                     line=dict(color=cor, width=1.5, dash='dot'),
                     legendgroup=aeronave,
                     showlegend=False,
-                    hoverinfo='skip'
+                    hoverinfo= 'skip'
                 ))
 
         fig_custom.update_layout(
             title="Participação Ponderada por Aeronave",
             xaxis_title="Período (Ano-Mês)",
             yaxis_title="Índice Ponderado (Participação)",
-            yaxis=dict(tickformat=".1%", range=[0, None]), # Eixo Y em %
+            yaxis=dict(tickformat=".1%", range=[0, None]),
             hovermode="x unified",
             height=550,
             legend=dict(orientation="v", y=1, x=1.02, xanchor="left", yanchor="top"),
-            xaxis=dict(
-                title="Período (Ano-Mês)",
-                type='category',
-                categoryorder='array',
-                categoryarray=todos_periodos_ordenados,
-                tickangle=-45
-            )
+            xaxis=dict(type='category', categoryorder='array', categoryarray=todos_periodos_ordenados, tickangle=-45)
         )
         
         st.plotly_chart(fig_custom, use_container_width=True)
 
-        # --- 5. MÉTRICAS DE RESUMO (AERONAVES) - Apenas Histórico ---
+        # --- 5. MÉTRICAS DE RESUMO (AERONAVES) - Histórico Puro ---
         st.markdown("---")
         
-        # Segurança: Garante que a lista 'aeronaves_relevantes' existe (caso venha do bloco anterior)
-        # Se não existir, recria a lógica baseada no corte de 0.01%
-        if 'aeronaves_relevantes' not in locals():
-            df_share_hist_temp = df_master_share[df_master_share.index <= data_max]
-            aeronaves_relevantes = [c for c in df_share_hist_temp.columns if df_share_hist_temp[c].max() >= 0.0001]
-
-        # 1. Aeronave Representativa (Baseada APENAS no Histórico Real)
-        # Usamos 'df_calculado' que contém apenas os dados filtrados originais (sem projeção)
+        # Filtrar dados originais (df_calculado) pelas aeronaves relevantes
+        # para garantir consistência nas métricas
         df_representatividade = df_calculado.filter(
             pl.col("aeronave").is_in(aeronaves_relevantes)
         ).group_by("aeronave").agg(
             pl.sum("valor_ponderado").alias("total_ponderado_historico")
         )
         
-        # Para o cálculo do %, usamos o Total Global (sem filtro) como denominador?
-        # Sim, para que o % seja consistente com o eixo Y do gráfico (Share de Mercado Total).
+        # Denominador histórico global (sem filtro de relevância, para manter % real)
         total_historico_global = df_calculado["valor_ponderado"].sum()
         
         if total_historico_global > 0 and df_representatividade.height > 0:
@@ -1281,14 +1202,10 @@ with tab1:
             nome_rep = top_representativa["aeronave"]
             valor_rep = top_representativa["share_historico"]
         else:
-            nome_rep = "N/A"
-            valor_rep = 0
+            nome_rep = "N/A"; valor_rep = 0
 
-        # 2. Maior Aeronave (Dentre as Relevantes)
-        nome_maior = "N/A"
-        assentos_maior = 0
-        
-        # Filtra o df_specs usando apenas a lista de relevantes
+        # Maior Aeronave (Capacidade)
+        nome_maior = "N/A"; assentos_maior = 0
         if 'df_specs' in globals() and df_specs is not None and aeronaves_relevantes:
             specs_filtrado = df_specs.filter(pl.col("sg_equipamento_icao").is_in(aeronaves_relevantes))
             if specs_filtrado.height > 0:
@@ -1296,234 +1213,222 @@ with tab1:
                 nome_maior = row_maior["sg_equipamento_icao"]
                 assentos_maior = int(row_maior["moda_assentos"])
 
-        # Exibição
         col_m1, col_m2 = st.columns(2)
         with col_m1:
-            st.metric(
-                "🏆 Aeronave Representativa (Histórico)", 
-                nome_rep, 
-                f"{valor_rep:.1%} do índice histórico", 
-                help="Aeronave relevante (>0,01%) com maior participação ponderada acumulada no período histórico."
-            )
+            st.metric("🏆 Aeronave Representativa (Histórico)", nome_rep, f"{valor_rep:.1%} do índice", help="Aeronave relevante com maior participação acumulada no histórico.")
         with col_m2:
-            st.metric(
-                "✈️ Maior Aeronave (Capacidade)", 
-                nome_maior, 
-                f"{assentos_maior} assentos (Moda)", 
-                help="Aeronave relevante (>0,01%) com maior capacidade operante no período histórico."
-            )
+            st.metric("✈️ Maior Aeronave (Capacidade)", nome_maior, f"{assentos_maior} assentos", help="Aeronave relevante com maior capacidade.")
 
-        with st.expander("📋 **Ver Tabela de Dados**"):
-            # Filtra também as colunas da tabela para mostrar apenas as aeronaves relevantes
-            st.dataframe(df_master_share[aeronaves_relevantes].style.format("{:.2%}"), use_container_width=True)
+        with st.expander("📋 **Ver Tabela de Dados (Visualização)**"):
+            # Exibe a tabela correspondente ao gráfico (Zoom do usuário)
+            st.dataframe(df_view_hist[top_aeronaves_plot].style.format("{:.2%}"), use_container_width=True)
 
-    # --- 5. GRÁFICO POR CATEGORIA DE AERONAVE ---
+        # --- 6. GRÁFICO POR CATEGORIA (AGREGADO) ---
         st.markdown("---")
-        st.markdown(f"#### 📈 **Evolução da Métrica Ponderada por Código de Aeronave**")
+        st.markdown(f"#### 📈 **Evolução da Métrica Ponderada por Categoria**")
 
-        # 6.1 PREPARAÇÃO DOS DADOS DE CATEGORIA
-        # Precisamos garantir que a coluna 'categoria_aeronave' exista.
-        # Tentamos trazê-la de df_specs se não estiver em df_calculado.
+        # 6.1 Preparação (Reutilizando projeções absolutas já calculadas)
+        mapa_final = {
+            'ATR': '2C',
+            'E195': '4C',
+            'A20N': '3C',
+            'B738': '4C',
+            'A321': '4C',
+            'A320': '4C',
+            'B38M': '4C',
+            'E295': '3C',
+            'B737': '4C',
+            'A21N': '4C',
+            'A319': '3C',
+            'C208': '1B',
+            'A332': '4E',
+            'B77W': '4E',
+            'A339': '4E',
+            'B763': '4D',
+            'B789': '4E',
+            'B734': '4C',
+            'B733': '4C',
+            'B722': '4C',
+            'B77L': '4E',
+            'B744': '4E',
+            'B788': '4E',
+            'CRJ2': '3B',
+            'A343': '4E',
+            'B772': '4E',
+            'B39M': '4C',
+            'A333': '4E',
+            'B773': '4E',
+            'E190': '4C',
+            'B78X': '4E',
+            'A388': '4F',
+            'B748': '4F',
+            'B739': '4C',
+            'MD11': '4D',
+            'B736': '3C',
+            'B764': '4D',
+            'B762': '4D',
+            'A124': '4F',
+            'A30B': '4D',
+            'A359': '4E',
+            'A35K': '4E',
+            'B190': '2B',
+            'IL76': '3D',
+            'A345': '4E',
+            'E145': '3B',
+            'L101': '4D',
+            'B753': '4D',
+            'A346': '4E',
+            'B743': '4E',
+            'A342': '4E',
+            'B703': '4D',
+            'T204': '4D'
+            }
         
-        df_cat_work = df_calculado.clone()
-        
-        if "categoria_aeronave" not in df_cat_work.columns:
-            if 'df_specs' in globals() and df_specs is not None:
-                # Tenta encontrar a coluna correta no df_specs (ajuste o nome se necessário)
-                # Assumindo que df_specs tem 'sg_equipamento_icao' e 'categoria_aeronave' (ou similar)
-                cols_specs = df_specs.columns
-                # Tenta adivinhar o nome da coluna de categoria se não for padrão
-                possible_cats = ['categoria_aeronave', 'cod_categoria', 'ds_categoria', 'classe']
-                col_cat_found = next((c for c in possible_cats if c in cols_specs), None)
+        # 2. Atualizar com dados do arquivo (Se disponível)
+        if 'df_specs' in globals() and df_specs is not None:
+            cols_specs = df_specs.columns
+            possible_cats = ['categoria_aeronave', 'cod_categoria', 'ds_categoria', 'classe', 'cat_icao']
+            col_cat_found = next((c for c in possible_cats if c in cols_specs), None)
+            
+            if col_cat_found:
+                # Extrair mapa do arquivo
+                mapa_arquivo = dict(df_specs.select([
+                    pl.col("sg_equipamento_icao"), pl.col(col_cat_found)
+                ]).iter_rows())
                 
-                if col_cat_found:
-                    df_cat_work = df_cat_work.join(
-                        df_specs.select([pl.col("sg_equipamento_icao").alias("aeronave"), pl.col(col_cat_found).alias("categoria_aeronave")]),
-                        on="aeronave",
-                        how="left"
-                    )
-                else:
-                    st.error("Não foi possível encontrar a coluna de Categoria no arquivo de especificações.")
+                # Atualizar o mapa final (Arquivo tem prioridade sobre o backup)
+                mapa_final.update({k: v for k, v in mapa_arquivo.items() if v is not None})
             else:
-                st.warning("Arquivo de especificações (df_specs) não carregado. Não é possível agrupar por categoria.")
+                # Apenas aviso discreto, o backup garante o funcionamento
+                pass 
 
-        # 6.2 CÁLCULO DAS PROJEÇÕES POR CATEGORIA
-        if "categoria_aeronave" in df_cat_work.columns:
-            
-            with st.spinner("Calculando projeções por Categoria..."):
-                # Converter para Pandas apenas as colunas necessárias
-                df_cat_pandas = df_cat_work.select(["periodo_str", "categoria_aeronave", "valor_ponderado"]).to_pandas()
-                df_cat_pandas["data"] = df_cat_pandas["periodo_str"].apply(converter_periodo)
-                df_cat_pandas["categoria_aeronave"] = df_cat_pandas["categoria_aeronave"].fillna("N/A")
-                
-                todas_categorias = sorted(df_cat_pandas["categoria_aeronave"].unique().tolist())
-                dict_projecoes_cat = {}
-                
-                # 1. Projetar valor absoluto (Numerador) para CADA categoria
-                for cat in todas_categorias:
-                    # Filtrar e agrupar (Soma dos valores da categoria naquela data)
-                    df_cat_serie = df_cat_pandas[df_cat_pandas["categoria_aeronave"] == cat].set_index("data")["valor_ponderado"]
-                    
-                    # Projetar usando a mesma função SARIMAX definida anteriormente
-                    dict_projecoes_cat[cat] = projetar_sarimax(df_cat_serie)
-                
-                # 2. Criar DataFrame Mestre de Categorias
-                df_master_cat_abs = pd.DataFrame(dict_projecoes_cat).fillna(0)
-                
-                # 3. Calcular o Denominador (Soma das projeções das categorias)
-                df_master_cat_abs["TOTAL_MERCADO_CAT"] = df_master_cat_abs.sum(axis=1)
-                
-                # 4. Calcular o Share
-                # Divide cada coluna pelo TOTAL
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    df_master_cat_share = df_master_cat_abs.div(df_master_cat_abs["TOTAL_MERCADO_CAT"], axis=0).fillna(0)
-                
-                df_master_cat_share = df_master_cat_share.drop(columns=["TOTAL_MERCADO_CAT"])
+        # 3. Aplicar Mapeamento ao DataFrame Histórico (Polars)
+        # Criar dataframe auxiliar para join
+        df_mapa = pl.DataFrame({
+            "aeronave": list(mapa_final.keys()),
+            "categoria_aeronave": list(mapa_final.values())
+        })
+        
+        # Join para adicionar categoria
+        df_cat_work = df_calculado.join(df_mapa, on="aeronave", how="left").with_columns(
+            pl.col("categoria_aeronave").fill_null("Outros")
+        )
 
-            # --- FILTRO DE RELEVÂNCIA PARA CATEGORIAS ---
-            # Verificar histórico (antes da data de corte)
-            df_cat_hist_check = df_master_cat_share[df_master_cat_share.index <= data_max]
-            
-            # Manter apenas categorias que atingiram pelo menos 0.01% em algum momento do histórico
-            categorias_relevantes = [
-                col for col in df_cat_hist_check.columns 
-                if df_cat_hist_check[col].max() >= 0.0001
-            ]
-            
-            # Se não houver categorias relevantes, avisar
-            if not categorias_relevantes:
-                st.warning("⚠️ Nenhuma categoria atingiu o critério mínimo de 0,01% de participação no histórico.")
-            
-            # Filtrar o DataFrame de plotagem
-            df_master_cat_share_filtrado = df_master_cat_share[categorias_relevantes]
+        # 6.2 CÁLCULO DAS PROJEÇÕES E PLOTAGEM
+        
+        # A. Agrupar as projeções absolutas (Pandas) usando o MESMO mapa
+        # df_master_absoluto (calculado na seção 4) tem colunas = nomes de aeronaves
+        df_abs_T = df_master_absoluto.drop(columns=["TOTAL_MERCADO"]).T
+        df_abs_T["categoria"] = df_abs_T.index.map(mapa_final).fillna("Outros")
+        
+        # Somar projeções por categoria
+        df_master_cat_abs = df_abs_T.groupby("categoria").sum().T
+        
+        # B. Calcular Share e Denominador
+        df_master_cat_abs["TOTAL_MERCADO_CAT"] = df_master_cat_abs.sum(axis=1)
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            df_master_cat_share = df_master_cat_abs.div(df_master_cat_abs["TOTAL_MERCADO_CAT"], axis=0).fillna(0)
+        
+        df_master_cat_share = df_master_cat_share.drop(columns=["TOTAL_MERCADO_CAT"])
 
-            # 6.3 PLOTAGEM
+        # C. Filtro de Relevância (Categoria)
+        df_cat_hist_check = df_master_cat_share[df_master_cat_share.index <= data_corte]
+        
+        # Critério: Pelo menos 0.01% em algum momento do histórico
+        cats_relevantes = [c for c in df_cat_hist_check.columns if df_cat_hist_check[c].max() >= 0.0001]
+        
+        if not cats_relevantes:
+            st.warning("⚠️ Nenhuma categoria atingiu a relevância mínima (0,01%) para exibição.")
+        else:
+            # D. Preparar Visualização (Zoom do Usuário)
+            df_cat_view = df_master_cat_share[cats_relevantes]
+            
+            df_cat_view_hist = df_cat_view[(df_cat_view.index >= data_inicio_usuario) & (df_cat_view.index <= data_fim_usuario)]
+            df_cat_view_proj = df_cat_view[df_cat_view.index > data_corte]
+            
+            # Eixo X
+            datas_cat_x = sorted(list(df_cat_view_hist.index) + (list(df_cat_view_proj.index) if permitir_projecao else []))
+            periodos_cat_ordenados = [f"{d.year}-M{str(d.month).zfill(2)}" for d in datas_cat_x]
+
+            # E. Plotagem
             fig_cat = go.Figure()
+            todas_categorias = sorted(cats_relevantes)
             
-            # Reutiliza o checkbox de projeção ou cria um novo se preferir
-            # mostrar_projecao já foi definido no bloco anterior, podemos reutilizar ou criar outro
-            
-            # Eixo X ordenado
-            periodos_cat_ordenados = [f"{d.year}-M{str(d.month).zfill(2)}" for d in df_master_cat_share.index]
-
-            # Iterar apenas sobre as categorias relevantes
-            for cat in sorted(categorias_relevantes):
-                series_share = df_master_cat_share_filtrado[cat]
-                cor_cat = obter_cor_aeronave(cat, todas_categorias) # Hash consistente
+            for cat in todas_categorias:
+                # Usar hash consistente para cor da categoria
+                cor_cat = obter_cor_aeronave(cat, sorted(df_master_cat_share.columns))
                 
-                # Separar Histórico e Projeção
-                share_hist = series_share[series_share.index <= data_max]
-                share_proj = series_share[series_share.index > data_max]
+                # Série Histórica
+                series_hist_cat = df_cat_view_hist[cat]
+                x_hist = [f"{d.year}-M{str(d.month).zfill(2)}" for d in series_hist_cat.index]
                 
-                # Conexão visual
-                if len(share_hist) > 0 and len(share_proj) > 0:
-                    ponto_conexao = share_hist.iloc[[-1]]
-                    share_proj = pd.concat([ponto_conexao, share_proj])
-
-                # Converter datas
-                x_hist = [f"{d.year}-M{str(d.month).zfill(2)}" for d in share_hist.index]
-                x_proj = [f"{d.year}-M{str(d.month).zfill(2)}" for d in share_proj.index]
-
-                # Plot Histórico
                 fig_cat.add_trace(go.Scatter(
-                    x=x_hist,
-                    y=share_hist.values,
-                    mode='lines+markers',
-                    name=cat,
-                    line=dict(color=cor_cat, width=2),
-                    marker=dict(size=5),
-                    legendgroup=cat,
+                    x=x_hist, y=series_hist_cat.values, mode='lines+markers', name=cat,
+                    line=dict(color=cor_cat, width=2), marker=dict(size=5), legendgroup=cat,
                     hovertemplate='<b>%{x}</b><br>Categoria: %{fullData.name}<br>Share: %{y:.2%}<extra></extra>'
                 ))
                 
-                # Plot Projeção (reutiliza checkbox anterior ou cria novo se preferir)
-                if mostrar_projecao and len(share_proj) > 1:
+                # Série Projetada
+                if mostrar_projecao and permitir_projecao:
+                    series_proj_cat = df_cat_view_proj[cat]
+                    
+                    # Conexão visual
+                    if len(series_hist_cat) > 0 and len(series_proj_cat) > 0 and series_hist_cat.index[-1] == data_corte:
+                        series_proj_cat = pd.concat([series_hist_cat.iloc[[-1]], series_proj_cat])
+                    
+                    x_proj = [f"{d.year}-M{str(d.month).zfill(2)}" for d in series_proj_cat.index]
+                    
                     fig_cat.add_trace(go.Scatter(
-                        x=x_proj,
-                        y=share_proj.values,
-                        mode='lines',
-                        name=f"Projeção {cat}",
-                        line=dict(color=cor_cat, width=1.5, dash='dot'),
-                        legendgroup=cat,
-                        showlegend=False,
-                        hoverinfo='skip'
+                        x=x_proj, y=series_proj_cat.values, mode='lines', name=f"Projeção {cat}",
+                        line=dict(color=cor_cat, width=1.5, dash='dot'), legendgroup=cat, showlegend=False,
+                        hoverinfo= 'skip'
                     ))
 
             fig_cat.update_layout(
-                title="Participação Ponderada por Categoria (Apenas Relevantes)",
+                title="Participação Ponderada por Categoria",
                 xaxis_title="Período (Ano-Mês)",
                 yaxis_title="Índice Ponderado (Participação)",
                 yaxis=dict(tickformat=".1%", range=[0, None]),
                 hovermode="x unified",
                 height=550,
                 legend=dict(orientation="v", y=1, x=1.02, xanchor="left", yanchor="top"),
-                xaxis=dict(
-                    title="Período (Ano-Mês)",
-                    type='category',
-                    categoryorder='array',
-                    categoryarray=periodos_cat_ordenados,
-                    tickangle=-45
-                )
+                xaxis=dict(type='category', categoryorder='array', categoryarray=periodos_cat_ordenados, tickangle=-45)
             )
-            
             st.plotly_chart(fig_cat, use_container_width=True)
             
-            # --- 6.4 MÉTRICAS DE RESUMO (CATEGORIA) - Apenas Histórico ---
+            # --- 6.4 MÉTRICAS DE RESUMO (CATEGORIA) ---
             st.markdown("---")
             
-            # 1. Código Representativo (Baseado APENAS no Histórico Real e Categorias Relevantes)
-            if "categoria_aeronave" in df_cat_work.columns:
-                # Filtrar apenas as categorias relevantes no dataframe original
-                df_rep_cat_hist = df_cat_work.filter(
-                    pl.col("categoria_aeronave").is_in(categorias_relevantes)
-                ).group_by("categoria_aeronave").agg(
-                    pl.sum("valor_ponderado").alias("total_ponderado_cat_hist")
-                )
-                
-                # Usar total global histórico como denominador para share real
-                total_global_cat_hist = df_cat_work["valor_ponderado"].sum()
-                
-                if total_global_cat_hist > 0 and df_rep_cat_hist.height > 0:
-                    top_rep_cat = df_rep_cat_hist.with_columns(
-                        (pl.col("total_ponderado_cat_hist") / total_global_cat_hist).alias("share_global")
-                    ).sort("share_global", descending=True).row(0, named=True)
-                    
-                    codigo_rep = top_rep_cat["categoria_aeronave"]
-                    valor_rep_cat = top_rep_cat["share_global"]
-                else:
-                    codigo_rep = "N/A"
-                    valor_rep_cat = 0
-            else:
-                codigo_rep = "N/A"
-                valor_rep_cat = 0
-
-            # 2. Maior Código (Hierarquia Alfanumérica presente no Histórico e Relevante)
-            # Ordenar alfabeticamente as categorias relevantes filtradas
-            categorias_relevantes_ordenadas = sorted(categorias_relevantes)
-            maior_codigo = categorias_relevantes_ordenadas[-1] if categorias_relevantes_ordenadas else "N/A"
-
-            # Exibição
-            col_mc1, col_mc2 = st.columns(2)
+            # Código Representativo (Histórico Puro)
+            # Agrupar df_cat_work (Polars) pelas categorias relevantes
+            df_rep_cat_hist = df_cat_work.filter(
+                pl.col("categoria_aeronave").is_in(cats_relevantes)
+            ).group_by("categoria_aeronave").agg(
+                pl.sum("valor_ponderado").alias("total_ponderado_cat_hist")
+            )
             
-            with col_mc1:
-                st.metric(
-                    label="🏆 Código Representativo (Histórico)", 
-                    value=codigo_rep, 
-                    delta=f"{valor_rep_cat:.1%} do índice histórico",
-                    help="Categoria relevante com maior participação ponderada acumulada no período histórico."
-                )
+            total_global_cat_hist = df_cat_work["valor_ponderado"].sum()
+            
+            if total_global_cat_hist > 0 and df_rep_cat_hist.height > 0:
+                top_rep_cat = df_rep_cat_hist.with_columns(
+                    (pl.col("total_ponderado_cat_hist") / total_global_cat_hist).alias("share_global")
+                ).sort("share_global", descending=True).row(0, named=True)
                 
-            with col_mc2:
-                st.metric(
-                    label="✈️ Maior Código (Hierarquia)", 
-                    value=maior_codigo,
-                    help="O maior código de referência de aeródromo presente e relevante nos dados históricos."
-                )
+                codigo_rep = top_rep_cat["categoria_aeronave"]
+                valor_rep_cat = top_rep_cat["share_global"]
+            else:
+                codigo_rep = "N/A"; valor_rep_cat = 0
 
-            with st.expander("📋 **Ver Tabela Detalhada por Categoria**"):
-                st.dataframe(df_master_cat_share_filtrado.style.format("{:.2%}"), use_container_width=True)
-        else:
-            st.warning("⚠️ Não foi possível gerar o gráfico de categorias (Coluna 'categoria_aeronave' ausente).")
+            # Maior Código
+            maior_codigo = sorted(cats_relevantes)[-1] if cats_relevantes else "N/A"
+
+            c1, c2 = st.columns(2)
+            c1.metric("🏆 Código Representativo (Histórico)", codigo_rep, f"{valor_rep_cat:.1%} do índice")
+            c2.metric("✈️ Maior Código (Hierarquia)", maior_codigo)
+
+            with st.expander("📋 **Ver Tabela Detalhada (Categoria)**"):
+                st.dataframe(df_cat_view_hist.style.format("{:.2%}"), use_container_width=True)
 
 
     # Nova Seção: Evolução Temporal de Voos por Aeronave
