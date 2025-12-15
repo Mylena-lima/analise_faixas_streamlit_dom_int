@@ -1200,54 +1200,6 @@ with tab1:
                  df_view_proj.index = pd.to_datetime(df_view_proj.index)
                  df_view_proj = df_view_proj[df_view_proj.index.month.isin(meses_selecionados_ids)]
 
-        # --- DEBUG COMPLETO: TABELA DE AUDITORIA DE TODOS OS MESES ---
-        with st.expander("🕵️‍♀️ **Auditoria Completa (Todos os Meses/Aeronaves)**", expanded=True):
-            st.markdown("### 📋 Detalhamento do Cálculo (Numerador vs Denominador)")
-
-            if not df_matriz_absoluta.empty:
-                # 1. Transformar a matriz (Wide) em lista longa (Long)
-                df_audit = df_matriz_absoluta.reset_index().melt(
-                    id_vars='data', 
-                    var_name='Aeronave', 
-                    value_name='Numerador (Índice)'
-                )
-                
-                # 2. Adicionar o Denominador (Total do Mês)
-                df_audit['Denominador (Total Mês)'] = df_audit['data'].map(df_total_mercado)
-                
-                # 3. Calcular o Share (MULTIPLICANDO POR 100 PARA FICAR CORRETO NO VISUAL)
-                df_audit['Share Calculado (%)'] = (df_audit['Numerador (Índice)'] / df_audit['Denominador (Total Mês)']) * 100
-                
-                # 4. Limpeza
-                df_audit = df_audit[df_audit['Denominador (Total Mês)'] > 0]
-                df_audit = df_audit[df_audit['Aeronave'].isin(top_aeronaves_plot)]
-                df_audit['Período'] = df_audit['data'].dt.strftime('%Y-%m')
-                
-                cols_final = ['Período', 'Aeronave', 'Numerador (Índice)', 'Denominador (Total Mês)', 'Share Calculado (%)']
-                df_audit_final = df_audit[cols_final].sort_values(['Período', 'Aeronave'])
-
-                # 5. Exibir Tabela (Agora com formato correto)
-                st.dataframe(
-                    df_audit_final,
-                    use_container_width=True,
-                    column_config={
-                        "Período": st.column_config.TextColumn("Mês/Ano"),
-                        "Numerador (Índice)": st.column_config.NumberColumn(
-                            "Seu Índice (Num)", format="%.0f"
-                        ),
-                        "Denominador (Total Mês)": st.column_config.NumberColumn(
-                            "Total Mercado (Den)", format="%.0f"
-                        ),
-                        "Share Calculado (%)": st.column_config.NumberColumn(
-                            "Share %", 
-                            format="%.2f%%", # Agora 59.0 vira 59.00%
-                            help="Percentual de participação"
-                        )
-                    },
-                    hide_index=True
-                )
-            else:
-                st.warning("Não há dados processados.")
 
         if 'meses_selecionados_ids' in locals() and meses_selecionados_ids:
             # Filtra o Histórico visual para remover os zeros técnicos
