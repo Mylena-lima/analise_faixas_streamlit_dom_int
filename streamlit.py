@@ -899,7 +899,7 @@ with tab1:
     st.markdown("---")
     st.header("✈️ **Resumo - Aeronaves**")
     st.markdown("### Análise da participação ponderada")
-    st.caption("Fórmula Y: $\\frac{\\text{Qtd Movimentos} \\times \\text{Pax}}{\\sum(\\text{Qtd Movimentos Total} \\times \\text{Pax Total})}$")
+    st.caption("Fórmula Y: $\\frac{\\text{Qtd Movimentos} \\times \\text{Pax}}{\\sum(\\text{Qtd Movimentos} \\times \\text{Pax})}$")
     # --- 1. CONFIGURAÇÃO DOS FILTROS ---
     
     # Container para os filtros
@@ -1038,19 +1038,19 @@ with tab1:
         df_voos_filtrado_final = df_voos_filtrado_final.filter(
             pl.col("mes").is_in(meses_selecionados_ids)
         )
-        # Aviso visual para o usuário entender que o gráfico ficará "recortado"
-        st.caption(f"⚠️ Visualizando apenas dados de: **{', '.join(meses_selecionados_nomes)}**. A projeção automática pode ser menos precisa devido à descontinuidade temporal.")
+        
 
     if df_voos_filtrado_final.height == 0:
         st.warning("⚠️ Nenhum dado encontrado para a faixa de passageiros selecionada.")
     else:
         # --- 3. CÁLCULO DA MÉTRICA (BASE COMPLETA) ---
         
-        # Criação da coluna 'periodo_str' e cálculo ponderado na base completa
-        df_calculado = df_voos_filtrado_final.with_columns(
-            (pl.col("quantidade_voos") * pl.col("pax")).alias("valor_ponderado"),
+        # Agora usamos a coluna 'indice' que já existe no seu arquivo parquet.
+        # Fazemos um alias para 'valor_ponderado' para manter a compatibilidade com o resto do script.
+        df_calculado = df_voos_filtrado_final.with_columns([
+            pl.col("indice").cast(pl.Float64).fill_null(0).alias("valor_ponderado"),
             (pl.col("ano").cast(pl.Utf8) + "-M" + pl.col("mes").cast(pl.Utf8).str.zfill(2)).alias("periodo_str")
-        )
+        ])
 
         # --- 4. VISUALIZAÇÃO GRÁFICO 1 COM PROJEÇÃO SARIMAX "BOTTOM-UP" ---
 
@@ -1158,11 +1158,96 @@ with tab1:
             top_aeronaves_plot = df_master_share_filtrado.sum().sort_values(ascending=False).index.tolist()
         
         # 3. Preparar View (Zoom do Usuário)
-        # O dataframe de plotagem contém histórico recortado + projeção completa (se habilitada)
-        df_view = df_master_share[top_aeronaves_plot]
+        # --- PASSO A: CÁLCULO DIRETO COM PIVOT TABLE ---
+        # Cria uma matriz: Linhas=Datas, Colunas=Aeronaves.
+        # aggfunc='sum' garante que se houver duplicatas, elas são somadas (Ex: 2 registros de ATR no mesmo dia).
+        df_matriz_absoluta = df_base_pandas.pivot_table(
+            index='data', 
+            columns='aeronave', 
+            values='valor_ponderado', 
+            aggfunc='sum'
+        ).fillna(0)
         
-        df_view_hist = df_view[(df_view.index >= data_inicio_usuario) & (df_view.index <= data_fim_usuario)]
-        df_view_proj = df_view[df_view.index > data_corte]
+        # --- PASSO B: CÁLCULO DO TOTAL DO MERCADO (DENOMINADOR) ---
+        # Soma linha a linha (axis=1) para saber o total do índice naquele mês
+        df_total_mercado = df_matriz_absoluta.sum(axis=1)
+        
+        # --- PASSO C: CÁLCULO DO SHARE (PERCENTUAL) ---
+        # Divide cada célula da matriz pelo total da sua linha correspondente
+        df_view_hist = df_matriz_absoluta.div(df_total_mercado, axis=0).fillna(0)
+        
+        # --- PASSO D: FILTRO DE VISUALIZAÇÃO ---
+        # Mantém apenas as Top Aeronaves (para não travar o gráfico com 50 linhas)
+        # e o período de tempo selecionado
+        cols_to_keep = [c for c in top_aeronaves_plot if c in df_view_hist.columns]
+        df_view_hist = df_view_hist[cols_to_keep]
+        
+        df_view_hist = df_view_hist[(df_view_hist.index >= data_inicio_usuario) & (df_view_hist.index <= data_fim_usuario)]
+
+        # --- PASSO E: MÁSCARA DE OPERAÇÃO ---
+        # Se o aeroporto não operou na data (não existe na base bruta), remove a linha do gráfico
+        datas_reais = pd.to_datetime(df_base_pandas["data"].unique())
+        df_view_hist = df_view_hist.loc[df_view_hist.index.intersection(datas_reais)]
+
+        # --- G. PROJEÇÃO ---
+        df_view_proj = df_master_share[top_aeronaves_plot]
+        df_view_proj = df_view_proj[df_view_proj.index > data_corte]
+        
+        # --- H. FILTRO DE SAZONALIDADE ---
+        if 'meses_selecionados_ids' in locals() and meses_selecionados_ids:
+             df_view_hist = df_view_hist[df_view_hist.index.month.isin(meses_selecionados_ids)]
+             if not df_view_proj.empty:
+                 df_view_proj.index = pd.to_datetime(df_view_proj.index)
+                 df_view_proj = df_view_proj[df_view_proj.index.month.isin(meses_selecionados_ids)]
+
+        # --- DEBUG COMPLETO: TABELA DE AUDITORIA DE TODOS OS MESES ---
+        with st.expander("🕵️‍♀️ **Auditoria Completa (Todos os Meses/Aeronaves)**", expanded=True):
+            st.markdown("### 📋 Detalhamento do Cálculo (Numerador vs Denominador)")
+
+            if not df_matriz_absoluta.empty:
+                # 1. Transformar a matriz (Wide) em lista longa (Long)
+                df_audit = df_matriz_absoluta.reset_index().melt(
+                    id_vars='data', 
+                    var_name='Aeronave', 
+                    value_name='Numerador (Índice)'
+                )
+                
+                # 2. Adicionar o Denominador (Total do Mês)
+                df_audit['Denominador (Total Mês)'] = df_audit['data'].map(df_total_mercado)
+                
+                # 3. Calcular o Share (MULTIPLICANDO POR 100 PARA FICAR CORRETO NO VISUAL)
+                df_audit['Share Calculado (%)'] = (df_audit['Numerador (Índice)'] / df_audit['Denominador (Total Mês)']) * 100
+                
+                # 4. Limpeza
+                df_audit = df_audit[df_audit['Denominador (Total Mês)'] > 0]
+                df_audit = df_audit[df_audit['Aeronave'].isin(top_aeronaves_plot)]
+                df_audit['Período'] = df_audit['data'].dt.strftime('%Y-%m')
+                
+                cols_final = ['Período', 'Aeronave', 'Numerador (Índice)', 'Denominador (Total Mês)', 'Share Calculado (%)']
+                df_audit_final = df_audit[cols_final].sort_values(['Período', 'Aeronave'])
+
+                # 5. Exibir Tabela (Agora com formato correto)
+                st.dataframe(
+                    df_audit_final,
+                    use_container_width=True,
+                    column_config={
+                        "Período": st.column_config.TextColumn("Mês/Ano"),
+                        "Numerador (Índice)": st.column_config.NumberColumn(
+                            "Seu Índice (Num)", format="%.0f"
+                        ),
+                        "Denominador (Total Mês)": st.column_config.NumberColumn(
+                            "Total Mercado (Den)", format="%.0f"
+                        ),
+                        "Share Calculado (%)": st.column_config.NumberColumn(
+                            "Share %", 
+                            format="%.2f%%", # Agora 59.0 vira 59.00%
+                            help="Percentual de participação"
+                        )
+                    },
+                    hide_index=True
+                )
+            else:
+                st.warning("Não há dados processados.")
 
         if 'meses_selecionados_ids' in locals() and meses_selecionados_ids:
             # Filtra o Histórico visual para remover os zeros técnicos
@@ -1280,8 +1365,28 @@ with tab1:
             st.metric("✈️ Maior Aeronave (Capacidade)", nome_maior, f"{assentos_maior} assentos", help="Aeronave relevante com maior capacidade.")
 
         with st.expander("📋 **Ver Tabela de Dados (Visualização)**"):
-            # Exibe a tabela correspondente ao gráfico (Zoom do usuário)
-            st.dataframe(df_view_hist[top_aeronaves_plot].style.format("{:.2%}"), use_container_width=True)
+            # 1. Criar uma cópia para manipulação visual (não afeta o gráfico)
+            df_tabela_visual = df_view_hist.copy()
+
+            # 2. Resetar o índice para que a 'data' vire uma coluna normal
+            df_tabela_visual = df_tabela_visual.reset_index()
+
+            # 3. Formatar a coluna 'data' para o formato "Ano-Mês" (ex: 2023-01)
+            # Se preferir "2023-M01", use: .dt.strftime('%Y-M%m')
+            df_tabela_visual['data'] = df_tabela_visual['data'].dt.strftime('%Y-%m')
+
+            # 4. Renomear a coluna para ficar mais apresentável
+            df_tabela_visual = df_tabela_visual.rename(columns={'data': 'Ano-Mês'})
+
+            # 5. Exibir com formatação de porcentagem nas colunas de aeronaves
+            # Identificamos as colunas numéricas (todas exceto 'Ano-Mês')
+            cols_numericas = [c for c in df_tabela_visual.columns if c != 'Ano-Mês']
+            
+            st.dataframe(
+                df_tabela_visual.style.format({c: "{:.2%}" for c in cols_numericas}),
+                use_container_width=True,
+                hide_index=True  # Esconde o índice numérico (0, 1, 2...)
+            )
 
         # --- 6. GRÁFICO POR CATEGORIA (AGREGADO) ---
         st.markdown("---")
@@ -1401,21 +1506,52 @@ with tab1:
         if not cats_relevantes:
             st.warning("⚠️ Nenhuma categoria atingiu a relevância mínima (0,01%) para exibição.")
         else:
-            # D. Preparar Visualização (Zoom do Usuário)
-            df_cat_view = df_master_cat_share[cats_relevantes]
+            # --- 1. PREPARAÇÃO DA BASE REAL (CATEGORIAS) ---
+            # Primeiro, garantimos que a base bruta tenha a coluna de categorias
+            # Usamos o dicionário mapa_final que já foi construído logo acima no código original
+            df_base_pandas['categoria_aeronave'] = df_base_pandas['aeronave'].map(mapa_final).fillna("Outros")
             
-            df_cat_view_hist = df_cat_view[(df_cat_view.index >= data_inicio_usuario) & (df_cat_view.index <= data_fim_usuario)]
-            df_cat_view_proj = df_cat_view[df_cat_view.index > data_corte]
+            # --- 2. AGREGAÇÃO E CÁLCULO DO SHARE REAL ---
+            # Agrupar por Data e Categoria (Soma os valores ponderados)
+            df_cat_hist_agregado = df_base_pandas.groupby(['data', 'categoria_aeronave'])['valor_ponderado'].sum().unstack()
             
+            # Preencher vazios com 0 (Se o aeroporto operou no mês, mas a categoria não, é 0%)
+            df_cat_hist_abs = df_cat_hist_agregado.fillna(0)
+            
+            # Calcular o Share Real
+            df_cat_hist_total = df_cat_hist_abs.sum(axis=1)
+            df_cat_hist_share = df_cat_hist_abs.div(df_cat_hist_total, axis=0).replace([np.inf, -np.inf], 0)
+            
+            # --- 3. FILTRAGEM ---
+            # Filtrar apenas as categorias relevantes e o período de tempo do slider
+            cats_para_plotar = [c for c in cats_relevantes if c in df_cat_hist_share.columns]
+            df_cat_view_hist = df_cat_hist_share[cats_para_plotar]
+            
+            # Filtro de tempo do slider
+            df_cat_view_hist = df_cat_view_hist[(df_cat_view_hist.index >= data_inicio_usuario) & (df_cat_view_hist.index <= data_fim_usuario)]
+            
+            # FILTRO DE DATAS REAIS (Apenas remove meses onde O AEROPORTO não operou)
+            # Garante consistência com o gráfico de aeronaves
+            datas_reais = pd.to_datetime(df_base_pandas["data"].unique())
+            df_cat_view_hist = df_cat_view_hist.loc[df_cat_view_hist.index.intersection(datas_reais)]
+
+            # Verifica se as colunas existem no master share antes de selecionar
+            cats_projecao = [c for c in cats_para_plotar if c in df_master_cat_share.columns]
+            df_cat_view_proj = df_master_cat_share[cats_projecao]
+            
+            # Filtra apenas datas futuras
+            df_cat_view_proj = df_cat_view_proj[df_cat_view_proj.index > data_corte]
+
+            # --- 5. FILTRO DE SAZONALIDADE (MESES ESPECÍFICOS) ---
             if 'meses_selecionados_ids' in locals() and meses_selecionados_ids:
+                # Garante índice datetime
                 df_cat_view_hist.index = pd.to_datetime(df_cat_view_hist.index)
                 df_cat_view_proj.index = pd.to_datetime(df_cat_view_proj.index)
                 
-                # Filtra o Histórico visual
+                # Filtra
                 df_cat_view_hist = df_cat_view_hist[df_cat_view_hist.index.month.isin(meses_selecionados_ids)]
-                
-                # Filtra a Projeção
-                df_cat_view_proj = df_cat_view_proj[df_cat_view_proj.index.month.isin(meses_selecionados_ids)]
+                if not df_cat_view_proj.empty:
+                    df_cat_view_proj = df_cat_view_proj[df_cat_view_proj.index.month.isin(meses_selecionados_ids)]
 
             # Eixo X
             datas_cat_x = sorted(list(df_cat_view_hist.index) + (list(df_cat_view_proj.index) if permitir_projecao else []))
@@ -1497,8 +1633,29 @@ with tab1:
             c1.metric("🏆 Código Representativo (Histórico)", codigo_rep, f"{valor_rep_cat:.1%} do índice")
             c2.metric("✈️ Maior Código (Hierarquia)", maior_codigo)
 
-            with st.expander("📋 **Ver Tabela Detalhada (Categoria)**"):
-                st.dataframe(df_cat_view_hist.style.format("{:.2%}"), use_container_width=True)
+            with st.expander("📋 **Ver Tabela de Dados (Visualização)**"):
+                # 1. Criar uma cópia para manipulação visual (não afeta o gráfico)
+                df_tabela_cat_visual = df_cat_view_hist.copy()
+
+                # 2. Resetar o índice para que a 'data' vire uma coluna normal
+                df_tabela_cat_visual = df_tabela_cat_visual.reset_index()
+
+                # 3. Formatar a coluna 'data' para o formato "Ano-Mês" (ex: 2023-01)
+                # Garante que a coluna seja tratada como data antes de formatar
+                df_tabela_cat_visual['data'] = pd.to_datetime(df_tabela_cat_visual['data']).dt.strftime('%Y-%m')
+
+                # 4. Renomear a coluna para ficar mais apresentável
+                df_tabela_cat_visual = df_tabela_cat_visual.rename(columns={'data': 'Ano-Mês'})
+
+                # 5. Exibir com formatação de porcentagem nas colunas de categorias
+                # Identificamos as colunas numéricas (todas exceto 'Ano-Mês')
+                cols_numericas_cat = [c for c in df_tabela_cat_visual.columns if c != 'Ano-Mês']
+                
+                st.dataframe(
+                    df_tabela_cat_visual.style.format({c: "{:.2%}" for c in cols_numericas_cat}),
+                    use_container_width=True,
+                    hide_index=True  # Esconde o índice numérico
+                )
 
 
     # Nova Seção: Evolução Temporal de Voos por Aeronave
