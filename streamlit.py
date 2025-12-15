@@ -971,22 +971,75 @@ with tab1:
                     index=len(options_end)-1
                 )
 
+    # --- NOVO: Filtro Específico de Aeroportos (Interseção com a Faixa) ---
+        st.markdown("---")
+        
+        # --- NOVOS FILTROS ESPECÍFICOS ---
+        col_spec1, col_spec2 = st.columns(2)
+
+        # 1. Filtro de Aeroportos Específicos (Interseção com a Faixa)
+        aeroportos_no_range_df = df_com_faixas.filter(
+            (pl.col("passageiros_projetado") >= pax_range_selecionado[0]) &
+            (pl.col("passageiros_projetado") <= pax_range_selecionado[1])
+        )
+        lista_aeroportos_disponiveis_faixa = sorted(aeroportos_no_range_df["aeroporto"].unique().to_list())
+        
+        with col_spec1:
+            aeroportos_especificos_analise = st.multiselect(
+                f"📍 **Filtrar Aeroportos (Faixa {formatar_numero(val_min)}-{formatar_numero(val_max)}):**",
+                options=lista_aeroportos_disponiveis_faixa,
+                default=[],
+                help="Deixe vazio para considerar TODOS os aeroportos da faixa."
+            )
+
+        # 2. Filtro de Meses Específicos (Sazonalidade)
+        mapa_meses = {
+            1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
+            7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
+        }
+        
+        with col_spec2:
+            meses_selecionados_nomes = st.multiselect(
+                "🗓️ **Filtrar Meses Específicos (Sazonalidade):**",
+                options=list(mapa_meses.values()),
+                default=[],
+                help="Selecione meses específicos (ex: Janeiro, Julho) para filtrar os dados. Deixe vazio para ver o ano todo."
+            )
+            
+            # Converter nomes selecionados para números (IDs dos meses)
+            if meses_selecionados_nomes:
+                meses_selecionados_ids = [k for k, v in mapa_meses.items() if v in meses_selecionados_nomes]
+            else:
+                meses_selecionados_ids = []
+
     # --- 2. PROCESSAMENTO DOS DADOS (BASE COMPLETA PARA O MODELO) ---
 
     # Parse dos filtros de tempo (Apenas para controle de visualização posterior)
     start_year, start_month = map(int, start_period.split("-M"))
     end_year, end_month = map(int, end_period.split("-M"))
 
-    # Passo 1: Identificar Aeroportos que atendem ao critério de passageiros
-    aeroportos_validos_pax = df_com_faixas.filter(
-        (pl.col("passageiros_projetado") >= pax_range_selecionado[0]) &
-        (pl.col("passageiros_projetado") <= pax_range_selecionado[1])
-    ).select(["aeroporto", "ano"])
+    # Passo 1: Aplicar filtro final nos aeroportos (Faixa + Seleção Específica)
+    if aeroportos_especificos_analise:
+        # Se o usuário selecionou aeroportos específicos, filtramos o dataframe do range
+        aeroportos_validos_pax = aeroportos_no_range_df.filter(
+            pl.col("aeroporto").is_in(aeroportos_especificos_analise)
+        ).select(["aeroporto", "ano"])
+    else:
+        # Se não selecionou nada, usa todos do range
+        aeroportos_validos_pax = aeroportos_no_range_df.select(["aeroporto", "ano"])
 
     # Passo 2: Filtrar a base de voos - MODO "FULL HISTORY"
     # [CRÍTICO]: NÃO aplicamos o filtro de data (start_year/end_year) aqui.
     # O modelo SARIMAX precisa de todo o histórico disponível para aprender a sazonalidade corretamente.
     df_voos_filtrado_final = df_filtrado1.join(aeroportos_validos_pax, on=["aeroporto", "ano"], how="inner")
+
+    # Passo 3: Aplicar Filtro de Meses (Sazonalidade) - SE HOUVER SELEÇÃO
+    if meses_selecionados_ids:
+        df_voos_filtrado_final = df_voos_filtrado_final.filter(
+            pl.col("mes").is_in(meses_selecionados_ids)
+        )
+        # Aviso visual para o usuário entender que o gráfico ficará "recortado"
+        st.caption(f"⚠️ Visualizando apenas dados de: **{', '.join(meses_selecionados_nomes)}**. A projeção automática pode ser menos precisa devido à descontinuidade temporal.")
 
     if df_voos_filtrado_final.height == 0:
         st.warning("⚠️ Nenhum dado encontrado para a faixa de passageiros selecionada.")
@@ -1110,6 +1163,13 @@ with tab1:
         
         df_view_hist = df_view[(df_view.index >= data_inicio_usuario) & (df_view.index <= data_fim_usuario)]
         df_view_proj = df_view[df_view.index > data_corte]
+
+        if 'meses_selecionados_ids' in locals() and meses_selecionados_ids:
+            # Filtra o Histórico visual para remover os zeros técnicos
+            df_view_hist = df_view_hist[df_view_hist.index.month.isin(meses_selecionados_ids)]
+            
+            # Filtra a Projeção para remover os meses gerados automaticamente pelo modelo
+            df_view_proj = df_view_proj[df_view_proj.index.month.isin(meses_selecionados_ids)]
 
         # Lista global para cores
         lista_global_aeronaves = sorted(df_filtrado1["aeronave"].unique().to_list())
@@ -1347,6 +1407,16 @@ with tab1:
             df_cat_view_hist = df_cat_view[(df_cat_view.index >= data_inicio_usuario) & (df_cat_view.index <= data_fim_usuario)]
             df_cat_view_proj = df_cat_view[df_cat_view.index > data_corte]
             
+            if 'meses_selecionados_ids' in locals() and meses_selecionados_ids:
+                df_cat_view_hist.index = pd.to_datetime(df_cat_view_hist.index)
+                df_cat_view_proj.index = pd.to_datetime(df_cat_view_proj.index)
+                
+                # Filtra o Histórico visual
+                df_cat_view_hist = df_cat_view_hist[df_cat_view_hist.index.month.isin(meses_selecionados_ids)]
+                
+                # Filtra a Projeção
+                df_cat_view_proj = df_cat_view_proj[df_cat_view_proj.index.month.isin(meses_selecionados_ids)]
+
             # Eixo X
             datas_cat_x = sorted(list(df_cat_view_hist.index) + (list(df_cat_view_proj.index) if permitir_projecao else []))
             periodos_cat_ordenados = [f"{d.year}-M{str(d.month).zfill(2)}" for d in datas_cat_x]
